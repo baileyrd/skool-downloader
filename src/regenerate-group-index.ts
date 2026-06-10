@@ -1,18 +1,7 @@
 import fs from 'fs-extra';
 import path from 'path';
 
-type CourseManifest = {
-    courseName: string;
-    groupName: string;
-    courseImageUrl?: string;
-    courseImagePath?: string;
-    modules: Array<{
-        index: number;
-        title: string;
-        moduleDirName: string;
-    }>;
-    updatedAt: string;
-};
+import { escapeHtml, writeAtomicHtml, type CourseManifest } from './shared.js';
 
 type GroupIndexCourse = {
     dirName: string;
@@ -27,12 +16,6 @@ type GroupIndexCourse = {
 type RegenerateOptions = {
     silent?: boolean;
 };
-
-async function writeAtomicHtml(filePath: string, content: string) {
-    const tempPath = `${filePath}.tmp`;
-    await fs.writeFile(tempPath, content);
-    await fs.move(tempPath, filePath, { overwrite: true });
-}
 
 async function countLessons(coursePath: string) {
     let modulesCount = 0;
@@ -166,7 +149,7 @@ async function regenerateGroupIndex(
                 const resolvedImagePath = path.join(coursePath, course.courseImagePath);
                 if (await fs.pathExists(resolvedImagePath)) {
                     const imageSrc = `${course.dirName}/${course.courseImagePath}`;
-                    imageMarkup = `<img src="${imageSrc}" alt="${course.courseName} cover">`;
+                    imageMarkup = `<img src="${escapeHtml(imageSrc)}" alt="${escapeHtml(course.courseName)} cover">`;
                 }
             }
 
@@ -175,10 +158,10 @@ async function regenerateGroupIndex(
                 : 'Unknown';
 
             return `
-                <a class="course-card" href="${courseIndexPath}">
+                <a class="course-card" href="${escapeHtml(courseIndexPath)}">
                     <div class="course-image">${imageMarkup}</div>
                     <div class="course-body">
-                        <h2>${course.courseName}</h2>
+                        <h2>${escapeHtml(course.courseName)}</h2>
                         <p class="course-meta">Updated ${updatedLabel}</p>
                         <div class="course-stats">
                             <span><strong>${course.modulesCount}</strong> modules</span>
@@ -196,7 +179,7 @@ async function regenerateGroupIndex(
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>${groupName} - Courses</title>
+            <title>${escapeHtml(groupName)} - Courses</title>
             <style>
                 :root {
                     --bg: #f8f6f1;
@@ -326,7 +309,7 @@ async function regenerateGroupIndex(
         <body>
             <div class="page">
                 <section class="hero">
-                    <h1 class="hero-title">${groupName}</h1>
+                    <h1 class="hero-title">${escapeHtml(groupName)}</h1>
                     <p class="hero-subtitle">All downloaded courses for this community.</p>
                     <div class="hero-meta">
                         <div class="chip"><strong>${courses.length}</strong> courses</div>

@@ -1,38 +1,12 @@
 import fs from 'fs-extra';
 import path from 'path';
 
-type CourseManifest = {
-    courseName: string;
-    groupName: string;
-    courseImageUrl?: string;
-    courseImagePath?: string;
-    modules: Array<{
-        index: number;
-        title: string;
-        moduleDirName: string;
-    }>;
-    updatedAt: string;
-};
-
-type LessonManifest = {
-    lessonId: string;
-    title: string;
-    moduleIndex: number;
-    moduleTitle: string;
-    lessonIndex: number;
-    moduleDirName: string;
-    lessonDirName: string;
-    relativePath: string;
-    hasVideo: boolean;
-    resourcesCount: number;
-    updatedAt: string;
-};
-
-async function writeAtomicHtml(filePath: string, content: string) {
-    const tempPath = `${filePath}.tmp`;
-    await fs.writeFile(tempPath, content);
-    await fs.move(tempPath, filePath, { overwrite: true });
-}
+import {
+    escapeHtml,
+    writeAtomicHtml,
+    type CourseManifest,
+    type LessonManifest
+} from './shared.js';
 
 /**
  * Regenerates the master index.html by scanning the downloads directory
@@ -246,7 +220,7 @@ async function regenerateIndex(
             <head>
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">
-                <title>${courseName}${groupName ? ` (${groupName})` : ''} - Backup</title>
+                <title>${escapeHtml(courseName)}${groupName ? ` (${escapeHtml(groupName)})` : ''} - Backup</title>
                 <style>
                     :root {
                         --bg: #f6f3ee;
@@ -422,15 +396,15 @@ async function regenerateIndex(
                 <div class="page">
                     ${groupName ? `
                         <div class="breadcrumb">
-                            <a href="../index.html">${groupName}</a>
+                            <a href="../index.html">${escapeHtml(groupName)}</a>
                             <span>/</span>
-                            <span>${courseName}</span>
+                            <span>${escapeHtml(courseName)}</span>
                         </div>
                     ` : ''}
                     <section class="hero">
                         <div class="hero-copy">
-                            <h1 class="hero-title">${courseName}</h1>
-                            <p class="hero-subtitle">${groupName ? `Community: ${groupName}` : 'Course Archive'}</p>
+                            <h1 class="hero-title">${escapeHtml(courseName)}</h1>
+                            <p class="hero-subtitle">${groupName ? `Community: ${escapeHtml(groupName)}` : 'Course Archive'}</p>
                             <div class="hero-meta">
                                 <div class="chip"><strong>${courseInfo.reduce((acc, m) => acc + m.lessons.length, 0)}</strong> lessons</div>
                                 <div class="chip"><strong>${courseInfo.length}</strong> modules</div>
@@ -439,7 +413,7 @@ async function regenerateIndex(
                         </div>
                         <div class="hero-image">
                             ${hasCourseImage && courseImagePath
-        ? `<img src="${courseImagePath}" alt="${courseName} cover">`
+        ? `<img src="${escapeHtml(courseImagePath)}" alt="${escapeHtml(courseName)} cover">`
         : `<div class="fallback">No course image available</div>`}
                         </div>
                     </section>
@@ -447,9 +421,9 @@ async function regenerateIndex(
                     <section class="content">
                         ${courseInfo.map(m => `
                             <div class="module">
-                                <h2 class="module-title"><span>Module ${m.index}</span>${m.title}</h2>
+                                <h2 class="module-title"><span>Module ${m.index}</span>${escapeHtml(m.title)}</h2>
                                 <ul class="lesson-list">
-                                    ${m.lessons.map((l: any) => `<li class="lesson"><a href="${l.path}">${l.title}</a></li>`).join('')}
+                                    ${m.lessons.map((l: any) => `<li class="lesson"><a href="${escapeHtml(l.path)}">${escapeHtml(l.title)}</a></li>`).join('')}
                                 </ul>
                             </div>
                         `).join('')}

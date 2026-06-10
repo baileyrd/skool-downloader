@@ -1,6 +1,7 @@
 import { intro, outro, select, text, confirm, spinner, isCancel, cancel, log, multiselect } from '@clack/prompts';
 import pc from 'picocolors';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import fs from 'fs-extra';
 import { Listr, PRESET_TIMER } from 'listr2';
 import { downloadCourse, type DownloadMode } from './index.js';
@@ -8,9 +9,10 @@ import { login, getAuthStatus } from './auth.js';
 import { regenerateIndex } from './regenerate-index.js';
 import { regenerateGroupIndex } from './regenerate-group-index.js';
 import { Scraper, type CourseLibraryResult, type CourseListItem } from './scraper.js';
+import { sanitizeName } from './shared.js';
 import type { Logger } from './logger.js';
 
-type CliArgs = {
+export type CliArgs = {
     command?: 'login' | 'download' | 'regenerate-index' | 'help';
     url?: string;
     outputDir?: string;
@@ -24,7 +26,13 @@ function showHelp() {
     console.log(`\nSkool Downloader\n\nUsage:\n  skool                          Interactive mode\n  skool login                    Log in to Skool\n  skool <classroom-url>          Download a course\n  skool <group-classroom-url>    Download all courses in a community\n  skool <lesson-url>             Download a single lesson (URL with ?md=)\n  skool regenerate-index         Regenerate all course indexes\n\nOptions:\n  -o, --output <dir>             Output directory (course root)\n  -c, --concurrency <number>     Lesson concurrency (default: 8)\n  --course                       Force course mode (ignore ?md=)\n  --lesson                       Force lesson mode\n  --lesson-id <id>               Explicit lesson id\n  -h, --help                     Show help\n`);
 }
 
-function parseArgs(args: string[]): CliArgs {
+/**
+ * Parses raw CLI arguments into a {@link CliArgs} structure.
+ *
+ * Pure function (aside from warning on unrecognized flags via stderr);
+ * exported for unit testing.
+ */
+export function parseArgs(args: string[]): CliArgs {
     const parsed: CliArgs = {};
 
     for (let i = 0; i < args.length; i++) {
@@ -36,7 +44,10 @@ function parseArgs(args: string[]): CliArgs {
         }
         if (arg === 'regenerate-index') {
             parsed.command = 'regenerate-index';
-            parsed.regenerateDir = args[i + 1];
+            if (args[i + 1] !== undefined) {
+                parsed.regenerateDir = args[i + 1];
+                i++;
+            }
             continue;
         }
         if (arg === '-h' || arg === '--help') {
@@ -65,6 +76,10 @@ function parseArgs(args: string[]): CliArgs {
             const next = args[i + 1];
             parsed.concurrency = next ? Number.parseInt(next, 10) : undefined;
             i++;
+            continue;
+        }
+        if (arg.startsWith('-')) {
+            console.error(`Warning: unrecognized flag "${arg}" ignored.`);
             continue;
         }
         if (!parsed.url && arg.startsWith('http')) {
@@ -102,10 +117,6 @@ function buildInteractiveLogger(): Logger {
 function formatExpiry(expiresAt?: Date) {
     if (!expiresAt) return 'unknown time';
     return expiresAt.toLocaleString();
-}
-
-function sanitizeName(value: string) {
-    return value.replace(/[/\\?%*:|"<>]/g, '-');
 }
 
 function isClassroomRootUrl(value: string) {
@@ -174,10 +185,9 @@ function createTaskRunner() {
             }
         );
 
+        // Listr.run() finalizes rendering internally (renderer.end() is called
+        // on both success and error paths), so no manual cleanup is needed.
         await list.run();
-        if (typeof list.renderer?.end === 'function') {
-            list.renderer.end();
-        }
         process.stdout.write('\n');
         await new Promise(resolve => setTimeout(resolve, 0));
     };
@@ -563,7 +573,12 @@ async function main() {
     await runWithArgs(args);
 }
 
-main().catch((error) => {
-    console.error('❌ An error occurred:', error);
-    process.exit(1);
-});
+// Only run the CLI when this module is the entrypoint (direct `tsx src/cli.ts`
+// or via bin/skool.js). Importing it — e.g. from tests — must not start
+// prompts or downloads.
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+    main().catch((error) => {
+        console.error('❌ An error occurred:', error);
+        process.exit(1);
+    });
+}

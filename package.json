@@ -3,14 +3,15 @@
   "version": "1.0.0",
   "type": "module",
   "description": "CLI tool that creates offline backups of Skool.com courses, including video, assets, and attachments.",
-  "main": "index.js",
   "bin": {
     "skool": "./bin/skool.js"
   },
   "scripts": {
     "skool": "tsx src/cli.ts",
     "login": "tsx src/cli.ts login",
-    "regenerate-index": "tsx src/cli.ts regenerate-index"
+    "regenerate-index": "tsx src/cli.ts regenerate-index",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "author": "balmasi",
   "license": "CC-BY-NC-4.0",
@@ -32,19 +33,19 @@
   "dependencies": {
     "@clack/prompts": "^0.11.0",
     "axios": "^1.13.3",
+    "ffmpeg-static": "^5.2.0",
     "fs-extra": "^11.3.3",
     "listr2": "^10.1.0",
     "p-limit": "^7.2.0",
     "picocolors": "^1.1.1",
     "playwright": "^1.58.0",
+    "tsx": "^4.21.0",
     "yt-dlp-wrap": "^2.3.12"
   },
   "devDependencies": {
-    "@types/axios": "^0.9.36",
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^25.0.10",
-    "ts-node": "^10.9.2",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.8"
   }
 }

@@ -3,6 +3,9 @@ downloads/*
 cookies.txt
 storage_state.json
 node_modules/*
+# yt-dlp is downloaded into bin/ on first run.
 bin/yt-dlp*
+# Legacy entries: ffmpeg now ships via the ffmpeg-static npm package
+# (node_modules), not bin/. Kept to ignore leftovers from old checkouts.
 bin/ffmpeg*
 bin/ffprobe*

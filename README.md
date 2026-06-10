@@ -6,7 +6,7 @@ This tool downloads video content, localizes images, preserves course attachment
 
 ## ✨ Features
 
-- **🚀 Smart Binary Management:** Automatically downloads the correct `yt-dlp` and `ffmpeg` binaries for your OS (Windows, macOS, Linux) and architecture (Intel, Apple Silicon ARM, Linux ARM).
+- **🚀 Smart Binary Management:** Automatically downloads the correct `yt-dlp` binary for your OS, and bundles a static `ffmpeg` (via [`ffmpeg-static`](https://www.npmjs.com/package/ffmpeg-static)) for Windows, macOS, and Linux on x64 and ARM64. On platforms `ffmpeg-static` does not cover, the tool warns and falls back to a system-wide `ffmpeg` for stream merging.
 - **📹 High-Quality Video:** Downloads the highest available quality and applies `+faststart` for instant browser playback.
 - **📄 Asset Localization:** Downloads all lesson images locally and rewrites HTML paths for true offline 100% viewing.
 - **📎 Resource Preservation:** Automatically fetches course attachments (PDFs, DOCX, etc.) via Skool's API.
@@ -17,8 +17,15 @@ This tool downloads video content, localizes images, preserves course attachment
 
 - [Node.js](https://nodejs.org/) (v18 or higher recommended)
 - [npm](https://www.npmjs.com/)
+- Playwright's Chromium browser — install it once with:
 
-**Note:** No system-wide installation of `yt-dlp` or `ffmpeg` is required. The tool manages these locally in the `bin/` folder.
+  ```bash
+  npx playwright install chromium
+  ```
+
+  Browsers are **not** downloaded automatically on `npm install` (it is slow and surprising). If you skip this step, the tool stops at startup with a message pointing you to the command above.
+
+**Note:** No system-wide installation of `yt-dlp` or `ffmpeg` is required on common platforms. `yt-dlp` is downloaded into the local `bin/` folder on first run, and `ffmpeg` ships with the package via `ffmpeg-static`.
 
 ## 🚀 Getting Started
 
@@ -49,9 +56,9 @@ npx skool-downloader
 
 If you prefer to stay completely local (and allow offline development), run `npm install` once and use `npm run skool` as shown below.
 
-If you prefer to stay completely local (and allow offline development), run `npm install` once and use `npm run skool` as shown below.
+> **Implementation note:** the published package ships its TypeScript sources and runs them through `tsx` at runtime (a regular dependency) instead of a compiled `dist/` build. This keeps installs simple at the cost of a slightly larger download.
 
-### 3. Downloading a Course
+### 4. Downloading a Course
 
 To download an entire classroom:
 

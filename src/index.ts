@@ -3,6 +3,13 @@ import { Downloader } from './downloader.js';
 import { regenerateIndex } from './regenerate-index.js';
 import { regenerateGroupIndex } from './regenerate-group-index.js';
 import { createConsoleLogger, type Logger } from './logger.js';
+import {
+    escapeHtml,
+    sanitizeName,
+    writeAtomicJson,
+    type CourseManifest,
+    type LessonManifest
+} from './shared.js';
 import fs from 'fs-extra';
 import path from 'path';
 import pLimit from 'p-limit';
@@ -41,34 +48,6 @@ function registerShutdownHandlers(logger: Logger) {
     process.once('SIGINT', () => { void handleShutdown('SIGINT'); });
     process.once('SIGTERM', () => { void handleShutdown('SIGTERM'); });
 }
-
-type CourseManifest = {
-    courseName: string;
-    groupName: string;
-    courseImageUrl?: string;
-    courseImagePath?: string;
-    modules: Array<{
-        index: number;
-        title: string;
-        moduleDirName: string;
-        root?: boolean;
-    }>;
-    updatedAt: string;
-};
-
-type LessonManifest = {
-    lessonId: string;
-    title: string;
-    moduleIndex: number;
-    moduleTitle: string;
-    lessonIndex: number;
-    moduleDirName: string;
-    lessonDirName: string;
-    relativePath: string;
-    hasVideo: boolean;
-    resourcesCount: number;
-    updatedAt: string;
-};
 
 export type DownloadMode = 'auto' | 'course' | 'lesson';
 
@@ -140,13 +119,14 @@ export type LessonTask = {
     run: (onStatus?: (message: string) => void) => Promise<void>;
 };
 
-async function writeAtomicJson(filePath: string, data: unknown) {
-    const tempPath = `${filePath}.tmp`;
-    await fs.writeJson(tempPath, data, { spaces: 2 });
-    await fs.move(tempPath, filePath, { overwrite: true });
-}
-
-function getUrlExtension(url: string) {
+/**
+ * Returns the file extension of a URL's pathname, falling back to `.jpg`
+ * when the URL is invalid, has no extension, or the extension is
+ * implausibly long (more than 5 characters including the dot).
+ *
+ * Exported for unit testing.
+ */
+export function getUrlExtension(url: string): string {
     try {
         const ext = path.extname(new URL(url).pathname);
         if (ext && ext.length <= 5) return ext;
@@ -156,15 +136,18 @@ function getUrlExtension(url: string) {
     return '.jpg';
 }
 
-function sanitizeName(value: string) {
-    return value.replace(/[/\\?%*:|"<>]/g, '-');
-}
-
-function resolveTargetLessonId(
+/**
+ * Resolves the target lesson id for a download: an explicit `lessonId`
+ * option wins, then the `md`/`lesson` query parameters of `url`. Returns
+ * null in course mode; throws in lesson mode when no id can be found.
+ *
+ * Exported for unit testing.
+ */
+export function resolveTargetLessonId(
     url: string,
     mode: DownloadMode,
     explicitLessonId?: string | null
-) {
+): string | null {
     if (mode === 'course') return null;
 
     let targetLessonId = explicitLessonId ?? null;
@@ -193,25 +176,8 @@ function normalizeConcurrency(value: number | undefined) {
 
 async function runConcurrent(tasks: Array<() => Promise<void>>, concurrency: number) {
     if (tasks.length === 0) return;
-    if (concurrency <= 1 || tasks.length === 1) {
-        for (const task of tasks) {
-            await task();
-        }
-        return;
-    }
-
-    let index = 0;
-    const workerCount = Math.min(concurrency, tasks.length);
-    const workers = Array.from({ length: workerCount }, async () => {
-        while (true) {
-            const current = index;
-            index += 1;
-            if (current >= tasks.length) return;
-            await tasks[current]();
-        }
-    });
-
-    await Promise.all(workers);
+    const limit = pLimit(Math.max(1, concurrency));
+    await Promise.all(tasks.map(task => limit(task)));
 }
 
 export async function downloadCourse(options: DownloadOptions): Promise<DownloadSummary> {
@@ -438,7 +404,7 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
 
                                     if (res.isExternal) {
                                         logger.info(`    🔗 External resource linked: ${res.title}`);
-                                        return `<li><a href="${res.downloadUrl}" target="_blank">${res.title} (External)</a></li>`;
+                                        return `<li><a href="${escapeHtml(res.downloadUrl)}" target="_blank">${escapeHtml(res.title)} (External)</a></li>`;
                                     }
 
                                     try {
@@ -450,13 +416,13 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                             const stats = fs.statSync(resPath);
                                             if (stats.size > 0) {
                                                 logger.info(`    ⏭️  Resource already exists, skipping: ${res.title}`);
-                                                return `<li><a href="resources/${encodeURIComponent(safeFileName)}" target="_blank">${res.title}</a></li>`;
+                                                return `<li><a href="resources/${encodeURIComponent(safeFileName)}" target="_blank">${escapeHtml(res.title)}</a></li>`;
                                             }
                                         }
 
                                         logger.info(`    ⬇️  Downloading resource: ${res.title}`);
                                         await downloader.downloadAsset(res.downloadUrl, resPath);
-                                        return `<li><a href="resources/${encodeURIComponent(safeFileName)}" target="_blank">${res.title}</a></li>`;
+                                        return `<li><a href="resources/${encodeURIComponent(safeFileName)}" target="_blank">${escapeHtml(res.title)}</a></li>`;
                                     } catch (err) {
                                         logger.warn(`    ⚠️  Failed to download resource ${res.title}: ${String(err)}`);
                                         return null;
@@ -472,7 +438,7 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                             const courseLink = isRootLesson ? '../index.html' : '../../index.html';
                             const moduleBreadcrumb = isRootLesson
                                 ? ''
-                                : `<span>/</span><span>${module.title}</span>`;
+                                : `<span>/</span><span>${escapeHtml(module.title)}</span>`;
 
                             const htmlContent = `
                             <!DOCTYPE html>
@@ -480,7 +446,7 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                             <head>
                                 <meta charset="UTF-8">
                                 <meta name="viewport" content="width=device-width, initial-scale=1">
-                                <title>${lessonData.title}</title>
+                                <title>${escapeHtml(lessonData.title)}</title>
                                 <style>
                                     :root {
                                         --bg: #f6f3ee;
@@ -559,15 +525,15 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                             <body>
                                 <div class="page">
                                     <div class="breadcrumb">
-                                        <a href="${groupLink}">${groupName}</a>
+                                        <a href="${groupLink}">${escapeHtml(groupName)}</a>
                                         <span>/</span>
-                                        <a href="${courseLink}">${courseName}</a>
+                                        <a href="${courseLink}">${escapeHtml(courseName)}</a>
                                         ${moduleBreadcrumb}
                                         <span>/</span>
-                                        <span>${lessonData.title}</span>
+                                        <span>${escapeHtml(lessonData.title)}</span>
                                     </div>
                                     <div class="container">
-                                        <h1>${lessonData.title}</h1>
+                                        <h1>${escapeHtml(lessonData.title)}</h1>
                                         ${hasVideo ? '<video controls src="video.mp4"></video>' : ''}
                                         <div class="content">
                                             ${localizedHtml}
