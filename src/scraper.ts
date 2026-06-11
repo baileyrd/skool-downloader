@@ -1,9 +1,18 @@
 import { chromium, errors as playwrightErrors, type Browser, type BrowserContext } from 'playwright';
 import fs from 'fs-extra';
+import pLimit from 'p-limit';
 import { createConsoleLogger, type Logger } from './logger.js';
 import { STORAGE_STATE_PATH } from './auth.js';
 import { escapeHtml } from './html-escape.js';
 import { assignResourceFileNames } from './shared.js';
+
+// Native Skool (Mux) video extraction clicks play and lets the stream run
+// while polling for the signed manifest URL. Each playing video decodes in
+// the shared headless Chromium; at the default lesson concurrency of 8 that
+// is eight simultaneous HLS players, which has crashed the browser process
+// outright. Limit how many lessons interact with the player at once —
+// everything else (page loads, metadata, resources) stays fully parallel.
+const muxInteractionLimit = pLimit(2);
 
 export interface Resource {
     title: string;
@@ -21,6 +30,8 @@ export interface Lesson {
     index?: number;
     contentHtml?: string;
     videoLink?: string;
+    /** The lesson has a native video but its stream URL could not be extracted. */
+    videoExtractionFailed?: boolean;
     resources?: Resource[];
 }
 
@@ -386,18 +397,21 @@ export class Scraper {
                 logger.info(`    ℹ️ Native videoId found: ${metadata.videoId}.`);
 
                 try {
-                    // Try to find and click the play button/thumbnail to trigger stream signed URL generation
-                    const playButtonSelector = 'div[class*="MuxThumbnailWrapper"]';
-                    const hasPlayButton = await page.evaluate((sel) => !!document.querySelector(sel), playButtonSelector);
+                    vLink = await muxInteractionLimit(async () => {
+                        // Try to find and click the play button/thumbnail to trigger stream signed URL generation
+                        const playButtonSelector = 'div[class*="MuxThumbnailWrapper"]';
+                        const hasPlayButton = await page.evaluate((sel) => !!document.querySelector(sel), playButtonSelector);
+                        if (!hasPlayButton) return '';
 
-                    if (hasPlayButton) {
                         logger.info('    🖱️ Clicking play button to initialize stream...');
                         await page.click(playButtonSelector);
+
+                        let streamUrl = '';
 
                         // Poll for the stream manifest to appear in network entries or player src
                         let attempts = 0;
                         while (attempts < 10) {
-                            vLink = await page.evaluate(() => {
+                            streamUrl = await page.evaluate(() => {
                                 // 1. Check performance entries for m3u8
                                 const entries = performance.getEntriesByType('resource')
                                     .filter(e => e.name.includes('m3u8') && e.name.includes('token='));
@@ -420,11 +434,30 @@ export class Scraper {
                                 return null;
                             });
 
-                            if (vLink) break;
+                            if (streamUrl) break;
                             await page.waitForTimeout(1000);
                             attempts++;
                         }
-                    }
+
+                        // Stop playback — the signed URL is captured, and a
+                        // video left playing keeps decoding (and downloading)
+                        // until the page closes, starving the other lessons.
+                        await page.evaluate(() => {
+                            const stack: any[] = [document];
+                            while (stack.length > 0) {
+                                const root = stack.pop();
+                                root.querySelectorAll('video').forEach((v: HTMLVideoElement) => v.pause());
+                                const elements = root.querySelectorAll('*');
+                                for (let i = 0; i < elements.length; i++) {
+                                    if (elements[i].shadowRoot) {
+                                        stack.push(elements[i].shadowRoot);
+                                    }
+                                }
+                            }
+                        }).catch(() => undefined);
+
+                        return streamUrl;
+                    });
 
                     // Fallback: Reconstruct from pageProps if interaction failed but we have IDs
                     if (!vLink) {
@@ -433,6 +466,10 @@ export class Scraper {
                             logger.info('    ℹ️ Using reconstructed HLS URL from page props fallback.');
                             vLink = `https://stream.video.skool.com/${videoData.playbackId}.m3u8?token=${videoData.playbackToken}`;
                         }
+                    }
+
+                    if (!vLink) {
+                        logger.warn(`    ⚠️ Lesson has a native video (${metadata.videoId}) but no stream URL could be extracted — video will be missing from the backup.`);
                     }
                 } catch (err) {
                     logger.warn(`    ⚠️ Interaction-based extraction failed: ${String(err)}`);
@@ -591,6 +628,7 @@ export class Scraper {
                 url: url,
                 contentHtml: body,
                 videoLink: vLink,
+                videoExtractionFailed: Boolean(metadata.videoId && !vLink),
                 resources: resources
             };
         } finally {

@@ -606,6 +606,18 @@ async function main() {
 // or via bin/skool.js). Importing it — e.g. from tests — must not start
 // prompts or downloads.
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+    // A crash must never be silent: without these handlers an uncaught
+    // exception or rejection from deep inside Playwright/yt-dlp can kill the
+    // process with nothing in the log but a truncated line.
+    process.on('uncaughtException', (error) => {
+        console.error('❌ Fatal uncaught exception:', error);
+        process.exit(1);
+    });
+    process.on('unhandledRejection', (reason) => {
+        console.error('❌ Fatal unhandled rejection:', reason);
+        process.exit(1);
+    });
+
     main().catch((error) => {
         console.error('❌ An error occurred:', error);
         process.exit(1);

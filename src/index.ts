@@ -469,7 +469,10 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                             const localizedHtml = await downloader.localizeImages(lessonData.contentHtml || '', lessonDir, lessonLogger);
 
                             let hasVideo = false;
-                            let videoFailed = false;
+                            // Extraction failure (native video, no stream URL) also
+                            // counts: the manifest must not claim completeness, so
+                            // the next run retries the lesson.
+                            let videoFailed = Boolean(lessonData.videoExtractionFailed);
                             if (lessonData.videoLink) {
                                 try {
                                     updateStatus('Downloading video...');

@@ -287,7 +287,18 @@ export class Downloader {
             // pipeline propagates errors from both the response stream and the
             // writer, and destroys both streams on failure.
             await pipeline(response.data as Readable, fs.createWriteStream(tmpPath));
-            await fs.move(tmpPath, outputPath, { overwrite: true });
+            try {
+                await fs.move(tmpPath, outputPath, { overwrite: true });
+            } catch (moveError) {
+                // Windows fails a rename with EPERM/EBUSY while a concurrent
+                // rename onto the same destination is in flight. If content
+                // landed at the destination (someone else won), that IS the
+                // requested outcome — clean up our copy and succeed.
+                await new Promise(resolve => setTimeout(resolve, 100));
+                const stats = await fs.stat(outputPath).catch(() => null);
+                if (!stats || stats.size === 0) throw moveError;
+                await fs.remove(tmpPath).catch(() => undefined);
+            }
         } catch (error) {
             // Best-effort cleanup of the partial temp file; the original
             // download error is what the caller needs to see.
