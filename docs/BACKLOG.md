@@ -13,6 +13,7 @@ work proceeds.
 | B5 | HTML escaping at all template interpolation points | P1 | done |
 | B6 | Scraper robustness: page try/finally, replace fixed sleeps, drop `--no-check-certificates` | P1 | done |
 | B7 | DRY cleanup: shared helpers/types/templates, arg parser fixes, pure-function tests | P2 | done |
+| B8 | Download Google Docs/Sheets/Slides resources via export URLs instead of leaving external links | P2 | todo |
 
 ---
 
@@ -117,3 +118,33 @@ escaped; generated pages remain valid; typecheck + tests green.
   `parseTipTap`, `resolveClassroomRootUrl`, `getUrlExtension`.
 
 **Done when:** no duplicated helper/type definitions remain; typecheck + tests green.
+
+## B8 — Localize Google Docs/Sheets/Slides resources (P2)
+
+`src/index.ts` (external-resource branch, ~line 405), `src/downloader.ts`
+(`downloadAsset`), `src/scraper.ts` (resource extraction).
+
+**Gap:** resources are classified by host, not file type (`src/scraper.ts`
+`isExternal` check). Native Skool attachments of any type (PPTX, XLSX, …) are
+downloaded, but Google Docs/Sheets/Slides are inherently links to
+`docs.google.com`, so they stay external-link-only. The README's offline-backup
+promise silently excludes them, and the links are fragile (sharing revoked, doc
+deleted, community shut down).
+
+- Detect Google Docs/Sheets/Slides URLs among `isExternal` resources and rewrite
+  to the unauthenticated export endpoints (work for "anyone with the link"
+  sharing, no API key/OAuth):
+  - `docs.google.com/document/d/<ID>/export?format=pdf` (or `docx`)
+  - `docs.google.com/spreadsheets/d/<ID>/export?format=xlsx`
+  - `docs.google.com/presentation/d/<ID>/export/pptx`
+- Download the export into the lesson's `resources/` folder via the existing
+  `downloadAsset` plumbing; link the local copy from the lesson page.
+- On export failure (sign-in required, download disabled), fall back to the
+  current external-link behavior and log a visible warning that the backup is
+  incomplete.
+- Out of scope (note for later): other external hosts (Dropbox, Notion, Loom)
+  remain link-only.
+
+**Done when:** unit tests cover URL detection/rewriting for all three Google
+types and the fallback path; a lesson with a link-shared Google Doc resource
+ends up with a local file in `resources/`; typecheck + tests green.
