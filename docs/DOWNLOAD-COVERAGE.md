@@ -13,6 +13,7 @@ For each lesson in a classroom (`src/index.ts`, lesson task):
 | Lesson text/body | `index.html` | Scraped rich-text content rendered into a styled offline page; embedded code blocks are preserved as part of the body |
 | Images in lesson content | `assets/` | Every `<img src>` is downloaded and the HTML rewritten to the local copy (`src/downloader.ts` `localizeImages`) |
 | Native file attachments | `resources/` | Download URL fetched per `file_id` from Skool's file API, then streamed to disk (`src/scraper.ts` resource extraction, `src/downloader.ts` `downloadAsset`) |
+| Google Docs/Sheets/Slides links | `resources/` | URL rewritten to Google's unauthenticated export endpoint (Docs → PDF, Sheets → XLSX, Slides → PPTX) and downloaded (`src/google-export.ts`); falls back to an external link with a warning if the export requires sign-in or is disabled |
 
 Per course:
 
@@ -45,17 +46,19 @@ dots/spaces, so extensions like `.zip` and `.tar.gz` are preserved.
 
 ## Known gaps and caveats
 
-### Google Docs / Sheets / Slides stay online-only (tracked: B8)
+### Google Docs / Sheets / Slides: exported when link-shared (B8, done)
 
-Google-hosted files are inherently links to `docs.google.com`, so they are
-classified external and never downloaded — even though they are often core
-course material. The links are also fragile (sharing revoked, doc deleted,
-community shut down). `docs/BACKLOG.md` item **B8** covers localizing them via
-Google's unauthenticated export endpoints.
+Google Docs, Sheets, and Slides links are rewritten to Google's
+unauthenticated export endpoints (`src/google-export.ts`) and downloaded into
+`resources/` — Docs as PDF, Sheets as XLSX, Slides as PPTX. This works for
+"anyone with the link" sharing. If the export requires sign-in or the owner
+has disabled downloads, Google serves an HTML page instead of the file; the
+downloader detects this, keeps the original external link, and logs a warning
+that the offline backup is incomplete.
 
-Edge case: if a creator exported a Google Doc to `.docx` and uploaded that file
-to Skool, it is a native attachment and *is* backed up. Only live Google links
-stay remote.
+Not exported (stay external links): published-to-web URLs (`/d/e/<token>`),
+Google Drive file links (`drive.google.com/file/...`), and Google Forms —
+these use different or nonexistent export endpoints.
 
 ### Other external hosts stay online-only
 

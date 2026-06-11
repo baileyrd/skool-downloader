@@ -196,8 +196,16 @@ export class Downloader {
      *
      * @param url - The asset URL to download.
      * @param outputPath - Absolute path the asset should land at.
+     * @param options.rejectHtmlResponse - Throw if the server responds with
+     *   `text/html`. Use for endpoints that serve a sign-in or error page
+     *   with HTTP 200 instead of the expected file (e.g. Google's export
+     *   URLs when sharing is restricted).
      */
-    async downloadAsset(url: string, outputPath: string): Promise<void> {
+    async downloadAsset(
+        url: string,
+        outputPath: string,
+        options: { rejectHtmlResponse?: boolean } = {}
+    ): Promise<void> {
         await fs.ensureDir(path.dirname(outputPath));
 
         // Skip if asset already exists. Sound because partial downloads only
@@ -220,6 +228,16 @@ export class Downloader {
             },
             timeout: 10000
         });
+
+        if (options.rejectHtmlResponse) {
+            const contentType = String(response.headers['content-type'] ?? '');
+            if (contentType.startsWith('text/html')) {
+                (response.data as Readable).destroy();
+                throw new Error(
+                    `Server returned an HTML page instead of a file (sign-in required or download disabled): ${url}`
+                );
+            }
+        }
 
         const tmpPath = `${outputPath}.tmp`;
         try {

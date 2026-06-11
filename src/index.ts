@@ -3,6 +3,7 @@ import { Downloader } from './downloader.js';
 import { regenerateIndex } from './regenerate-index.js';
 import { regenerateGroupIndex } from './regenerate-group-index.js';
 import { createConsoleLogger, type Logger } from './logger.js';
+import { buildGoogleExportInfo } from './google-export.js';
 import {
     escapeHtml,
     sanitizeName,
@@ -403,6 +404,25 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                     if (!res.downloadUrl) return null;
 
                                     if (res.isExternal) {
+                                        // Google Docs/Sheets/Slides links can be localized via
+                                        // their unauthenticated export endpoints; other external
+                                        // hosts stay link-only.
+                                        const exportInfo = buildGoogleExportInfo(res.downloadUrl);
+                                        if (exportInfo) {
+                                            const baseName = sanitizeName(res.title);
+                                            const safeFileName = baseName.toLowerCase().endsWith(`.${exportInfo.extension}`)
+                                                ? baseName
+                                                : `${baseName}.${exportInfo.extension}`;
+                                            const resPath = path.join(resourcesDir, safeFileName);
+                                            try {
+                                                updateStatus('Downloading resources...');
+                                                logger.info(`    ⬇️  Exporting Google resource: ${res.title}`);
+                                                await downloader.downloadAsset(exportInfo.exportUrl, resPath, { rejectHtmlResponse: true });
+                                                return `<li><a href="resources/${encodeURIComponent(safeFileName)}" target="_blank">${escapeHtml(res.title)}</a></li>`;
+                                            } catch (err) {
+                                                logger.warn(`    ⚠️ Could not export Google resource "${res.title}" (sign-in required or download disabled) — keeping external link; offline backup is incomplete.`);
+                                            }
+                                        }
                                         logger.info(`    🔗 External resource linked: ${res.title}`);
                                         return `<li><a href="${escapeHtml(res.downloadUrl)}" target="_blank">${escapeHtml(res.title)} (External)</a></li>`;
                                     }

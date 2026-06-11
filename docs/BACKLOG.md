@@ -13,7 +13,7 @@ work proceeds.
 | B5 | HTML escaping at all template interpolation points | P1 | done |
 | B6 | Scraper robustness: page try/finally, replace fixed sleeps, drop `--no-check-certificates` | P1 | done |
 | B7 | DRY cleanup: shared helpers/types/templates, arg parser fixes, pure-function tests | P2 | done |
-| B8 | Download Google Docs/Sheets/Slides resources via export URLs instead of leaving external links | P2 | todo |
+| B8 | Download Google Docs/Sheets/Slides resources via export URLs instead of leaving external links | P2 | done |
 
 ---
 
