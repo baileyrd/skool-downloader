@@ -7,7 +7,7 @@ This tool downloads video content, localizes images, preserves course attachment
 ## ✨ Features
 
 - **🚀 Smart Binary Management:** Automatically downloads the correct `yt-dlp` binary for your OS, and bundles a static `ffmpeg` (via [`ffmpeg-static`](https://www.npmjs.com/package/ffmpeg-static)) for Windows, macOS, and Linux on x64 and ARM64. On platforms `ffmpeg-static` does not cover, the tool warns and falls back to a system-wide `ffmpeg` for stream merging.
-- **📹 High-Quality Video:** Downloads the highest available quality and applies `+faststart` for instant browser playback.
+- **📹 Compatible Video:** Downloads up to 1080p, preferring H.264/AAC so the resulting `.mp4` plays everywhere, and applies `+faststart` for instant browser playback. Use `--quality best` for the highest available quality (can mean 4K VP9 — far larger files with patchier player support) or e.g. `--quality 720` to save disk.
 - **📄 Asset Localization:** Downloads all lesson images locally and rewrites HTML paths for true offline 100% viewing.
 - **📎 Resource Preservation:** Automatically fetches course attachments (PDFs, DOCX, etc.) via Skool's API.
 - **🎯 Single Lesson Mode:** Download a whole course or just a single lesson using a specific URL.
@@ -86,6 +86,19 @@ To download only a **single lesson**:
 ```bash
 npm run skool "https://www.skool.com/your-community/classroom/course-id?md=lesson-id"
 ```
+
+### Useful options
+
+| Flag | Effect |
+|------|--------|
+| `-o, --output <dir>` | Output directory (course root) |
+| `-c, --concurrency <n>` | Lessons processed in parallel (default 8) |
+| `-q, --quality <height\|best>` | Max video height, e.g. `1080` (default), `720`, or `best` for no cap |
+| `--force` | Re-scrape lessons even when they are already complete on disk |
+
+Re-runs are fast by default: lessons whose video and resources are already on
+disk (tracked in each lesson's `lesson.json`) are skipped without opening a
+browser page. Use `--force` to pick up content edits made on Skool.
 
 ## 📁 Output Structure
 

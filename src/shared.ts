@@ -39,6 +39,54 @@ export function sanitizeName(value: string): string {
 }
 
 /**
+ * Minimal structural shape of a lesson resource for filename assignment.
+ * (Matches `Resource` from the scraper without importing it — avoids a
+ * module cycle.)
+ */
+export type NamedResource = { title: string; file_name?: string };
+
+/**
+ * Assigns each resource a unique local filename within a lesson's
+ * `resources/` folder.
+ *
+ * The base name is `sanitizeName(file_name || title)`. When two resources in
+ * the same lesson share a base name (e.g. three different skills all
+ * attached as `SKILL.md`), every colliding resource gets its sanitized title
+ * prefixed; a numeric prefix is the last resort when titles collide too.
+ * Non-colliding resources keep their plain base name, so filenames from
+ * earlier downloads stay valid.
+ */
+export function assignResourceFileNames<T extends NamedResource>(resources: T[]): Map<T, string> {
+    const baseCounts = new Map<string, number>();
+    for (const res of resources) {
+        const base = sanitizeName(res.file_name || res.title);
+        baseCounts.set(base, (baseCounts.get(base) ?? 0) + 1);
+    }
+
+    const used = new Set<string>();
+    const assigned = new Map<T, string>();
+    for (const res of resources) {
+        const base = sanitizeName(res.file_name || res.title);
+        let name = base;
+        if ((baseCounts.get(base) ?? 0) > 1) {
+            const titled = sanitizeName(res.title);
+            if (titled !== base) {
+                name = `${titled}-${base}`;
+            }
+        }
+        let candidate = name;
+        let counter = 2;
+        while (used.has(candidate)) {
+            candidate = `${counter}-${name}`;
+            counter += 1;
+        }
+        used.add(candidate);
+        assigned.set(res, candidate);
+    }
+    return assigned;
+}
+
+/**
  * Writes JSON to `filePath` atomically: data is written to a `.tmp` sibling
  * first and then moved into place, so readers never observe a partial file.
  */
@@ -90,5 +138,15 @@ export type LessonManifest = {
     relativePath: string;
     hasVideo: boolean;
     resourcesCount: number;
+    /**
+     * Local filenames (within `resources/`) of successfully downloaded
+     * resources. Present on manifests written since the fast-resume feature;
+     * its absence marks an older manifest that must be re-scraped once.
+     */
+    resourceFiles?: string[];
+    /** True when the lesson has a video but its download failed. */
+    videoFailed?: boolean;
+    /** Number of resources that failed to download in the last run. */
+    resourceFailures?: number;
     updatedAt: string;
 };

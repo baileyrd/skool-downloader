@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { sanitizeName } from '../src/shared.js';
+import { assignResourceFileNames, sanitizeName } from '../src/shared.js';
 
 describe('sanitizeName', () => {
     it('replaces illegal filename characters with dashes', () => {
@@ -48,5 +48,73 @@ describe('sanitizeName', () => {
         expect(sanitizeName('')).toBe('_');
         expect(sanitizeName('   ')).toBe('_');
         expect(sanitizeName('...')).toBe('_');
+    });
+});
+
+describe('assignResourceFileNames', () => {
+    it('keeps plain base names when there are no collisions', () => {
+        const resources = [
+            { title: 'Notes', file_name: 'notes.pdf' },
+            { title: 'Slides', file_name: 'slides.pptx' },
+            { title: 'No file name' }
+        ];
+        const names = assignResourceFileNames(resources);
+        expect(names.get(resources[0])).toBe('notes.pdf');
+        expect(names.get(resources[1])).toBe('slides.pptx');
+        expect(names.get(resources[2])).toBe('No file name');
+    });
+
+    it('prefixes colliding base names with the resource title', () => {
+        // Real case: three different Claude Code skills, all attached as
+        // SKILL.md. Without disambiguation they raced on the same path and
+        // every copy was lost.
+        const resources = [
+            { title: 'lightrag-query', file_name: 'SKILL.md' },
+            { title: 'lightrag-status', file_name: 'SKILL.md' },
+            { title: 'lightrag-upload', file_name: 'SKILL.md' }
+        ];
+        const names = assignResourceFileNames(resources);
+        expect(names.get(resources[0])).toBe('lightrag-query-SKILL.md');
+        expect(names.get(resources[1])).toBe('lightrag-status-SKILL.md');
+        expect(names.get(resources[2])).toBe('lightrag-upload-SKILL.md');
+    });
+
+    it('falls back to numeric prefixes when titles collide too', () => {
+        const resources = [
+            { title: 'Skill', file_name: 'SKILL.md' },
+            { title: 'Skill', file_name: 'SKILL.md' }
+        ];
+        const names = assignResourceFileNames(resources);
+        const assigned = [names.get(resources[0]), names.get(resources[1])];
+        expect(new Set(assigned).size).toBe(2);
+        expect(assigned[0]).toBe('Skill-SKILL.md');
+        expect(assigned[1]).toBe('2-Skill-SKILL.md');
+    });
+
+    it('handles title-derived base names that collide', () => {
+        const resources = [
+            { title: 'Starter Code' },
+            { title: 'Starter Code' }
+        ];
+        const names = assignResourceFileNames(resources);
+        const assigned = [names.get(resources[0]), names.get(resources[1])];
+        expect(new Set(assigned).size).toBe(2);
+    });
+
+    it('sanitizes unsafe characters in assigned names', () => {
+        const resources = [{ title: 'a/b', file_name: 'c:d.txt' }];
+        expect(assignResourceFileNames(resources).get(resources[0])).toBe('c-d.txt');
+    });
+
+    it('never assigns the same name twice across a large mixed list', () => {
+        const resources = [
+            { title: 'One', file_name: 'file.md' },
+            { title: 'Two', file_name: 'file.md' },
+            { title: 'One', file_name: 'file.md' },
+            { title: 'file.md' },
+            { title: 'Other', file_name: 'other.md' }
+        ];
+        const names = assignResourceFileNames(resources);
+        expect(new Set(names.values()).size).toBe(resources.length);
     });
 });

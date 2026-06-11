@@ -14,6 +14,12 @@ work proceeds.
 | B6 | Scraper robustness: page try/finally, replace fixed sleeps, drop `--no-check-certificates` | P1 | done |
 | B7 | DRY cleanup: shared helpers/types/templates, arg parser fixes, pure-function tests | P2 | done |
 | B8 | Download Google Docs/Sheets/Slides resources via export URLs instead of leaving external links | P2 | done |
+| B9 | Fix resource filename collisions (same `file_name` in one lesson destroyed all copies) + unique temp-file suffix in `downloadAsset` | P0 | done |
+| B10 | Surface failed resource downloads on the lesson page and in the run summary instead of dropping them silently | P1 | done |
+| B11 | Cap video quality at 1080p H.264/AAC by default (was uncapped `--prefer-free-formats` → 4K VP9/Opus in .mp4); add `--quality` flag | P1 | done |
+| B12 | Fast resume: skip lessons proven complete by `lesson.json` (`resourceFiles` field) without opening a browser page; add `--force` | P1 | done |
+| B13 | Regenerate course index once per course instead of after every lesson (was an unawaited floating promise, 280 regens per run) | P2 | done |
+| B14 | Log hygiene: per-lesson `[m.l]` prefixes for interleaved concurrent output, redact signed tokens from stream URLs, list locked course names; vitest config excludes Playwright `tests/`; auth expiry reads the `auth_token` cookie | P2 | done |
 
 ---
 

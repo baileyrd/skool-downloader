@@ -3,7 +3,7 @@ import ffmpegStaticPkg from 'ffmpeg-static';
 import path from 'path';
 import fs from 'fs-extra';
 import axios from 'axios';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'stream';
 import { pipeline } from 'node:stream/promises';
 import { createConsoleLogger, type Logger } from './logger.js';
@@ -19,6 +19,27 @@ const BIN_DIR = path.join(process.cwd(), 'bin');
 const YTDLP_PATH = path.join(BIN_DIR, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
 
 const IMG_SRC_REGEX = /(<img[^>]+src=")([^">]+)(")/g;
+
+/** Video quality cap: a max height in pixels, or 'best' for no cap. */
+export type VideoQuality = number | 'best';
+
+export const DEFAULT_VIDEO_QUALITY: VideoQuality = 1080;
+
+/**
+ * Strips the query string and hash from a URL for logging. Skool's HLS
+ * stream URLs carry signed auth tokens in the query string; those must not
+ * land in console output or logs.
+ */
+export function redactUrlForLog(url: string): string {
+    try {
+        const parsed = new URL(url);
+        const hasQuery = parsed.search.length > 0 || parsed.hash.length > 0;
+        return `${parsed.origin}${parsed.pathname}${hasQuery ? '?…' : ''}`;
+    } catch {
+        // Not parseable as a URL — truncate rather than risk echoing a token.
+        return url.length > 100 ? `${url.substring(0, 97)}...` : url;
+    }
+}
 
 /**
  * Build a collision-resistant local filename for a remote image URL.
@@ -81,23 +102,36 @@ export function rewriteImageSrcs(html: string, urlToLocalPath: Map<string, strin
  *   platform. When `null`, yt-dlp falls back to a system ffmpeg.
  * @param options.cookiesPath - Path to a Netscape cookies.txt file,
  *   or `null` to omit cookies.
+ * @param options.quality - Max video height in pixels (default 1080), or
+ *   'best' for the highest available. Numeric caps also prefer H.264/AAC so
+ *   the resulting .mp4 plays everywhere; uncapped 'best' takes whatever
+ *   codec is highest quality (e.g. 4K VP9 — huge files, patchy player
+ *   support in an .mp4 container).
  * @returns The argument array to pass to yt-dlp.
  */
 export function buildVideoArgs(
     url: string,
     outputPath: string,
-    options: { ffmpegLocation?: string | null; cookiesPath?: string | null } = {}
+    options: {
+        ffmpegLocation?: string | null;
+        cookiesPath?: string | null;
+        quality?: VideoQuality;
+    } = {}
 ): string[] {
+    const quality = options.quality ?? DEFAULT_VIDEO_QUALITY;
     const args = [
         url,
         '-o', outputPath,
-        '--prefer-free-formats',
         '--add-header', 'Referer:https://www.skool.com/',
         '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         '--merge-output-format', 'mp4',
-        '-N', '16',
+        '-N', '8',
         '--postprocessor-args', 'ffmpeg:-movflags +faststart'
     ];
+
+    if (typeof quality === 'number') {
+        args.push('-S', `res:${quality},vcodec:h264,acodec:m4a`);
+    }
 
     if (options.ffmpegLocation) {
         args.push('--ffmpeg-location', options.ffmpegLocation);
@@ -140,8 +174,14 @@ export class Downloader {
         return this.initPromise;
     }
 
-    async downloadVideo(url: string, outputDir: string, filename: string) {
+    async downloadVideo(
+        url: string,
+        outputDir: string,
+        filename: string,
+        options: { logger?: Logger; quality?: VideoQuality } = {}
+    ) {
         if (!this.ytDlp) await this.init();
+        const logger = options.logger ?? this.logger;
 
         await fs.ensureDir(outputDir);
         const outputPath = path.join(outputDir, `${filename}.mp4`);
@@ -150,19 +190,18 @@ export class Downloader {
         if (fs.existsSync(outputPath)) {
             const stats = fs.statSync(outputPath);
             if (stats.size > 0) {
-                this.logger.info(`    ⏭️  Video already exists, skipping download (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
+                logger.info(`    ⏭️  Video already exists, skipping download (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
                 return;
             }
         }
 
-        const displayUrl = url.length > 100 ? url.substring(0, 97) + '...' : url;
-        this.logger.info(`    ⬇️  Downloading video from ${displayUrl}`);
+        logger.info(`    ⬇️  Downloading video from ${redactUrlForLog(url)}`);
 
         // ffmpeg-static resolves to a bundled static ffmpeg binary, or null
         // on platforms it does not ship binaries for. Without ffmpeg, yt-dlp
         // cannot merge separate audio/video streams or apply +faststart.
         if (!ffmpegPath) {
-            this.logger.warn(
+            logger.warn(
                 '    ⚠️ No bundled ffmpeg available for this platform. ' +
                 'Stream merging requires ffmpeg — install it system-wide ' +
                 'and ensure it is on your PATH.'
@@ -171,14 +210,15 @@ export class Downloader {
 
         const args = buildVideoArgs(url, outputPath, {
             ffmpegLocation: ffmpegPath,
-            cookiesPath: fs.existsSync(COOKIES_TXT_PATH) ? COOKIES_TXT_PATH : null
+            cookiesPath: fs.existsSync(COOKIES_TXT_PATH) ? COOKIES_TXT_PATH : null,
+            quality: options.quality
         });
 
         try {
             await this.ytDlp!.execPromise(args);
-            this.logger.info(`Video downloaded successfully to ${outputDir}`);
+            logger.info(`    ✅ Video downloaded to ${outputDir}`);
         } catch (error) {
-            this.logger.error(`Error downloading video: ${String(error)}`);
+            logger.error(`    ⚠️ Error downloading video: ${String(error)}`);
             throw error;
         }
     }
@@ -239,7 +279,10 @@ export class Downloader {
             }
         }
 
-        const tmpPath = `${outputPath}.tmp`;
+        // Unique per-call suffix: if two concurrent downloads ever target the
+        // same final path, they must not race on a shared temp file (last
+        // rename wins instead of ENOENT crashes).
+        const tmpPath = `${outputPath}.${randomUUID().slice(0, 8)}.tmp`;
         try {
             // pipeline propagates errors from both the response stream and the
             // writer, and destroys both streams on failure.
@@ -253,7 +296,8 @@ export class Downloader {
         }
     }
 
-    async localizeImages(html: string, outputDir: string): Promise<string> {
+    async localizeImages(html: string, outputDir: string, logger?: Logger): Promise<string> {
+        const log = logger ?? this.logger;
         const assetsDir = path.join(outputDir, 'assets');
         const urlToLocalPath = new Map<string, string>();
         const tasks: { url: string; outputPath: string }[] = [];
@@ -268,7 +312,7 @@ export class Downloader {
 
             const filename = buildImageFilename(url);
             if (filename === null) {
-                this.logger.warn(`      ⚠️ Skipping unparseable image URL: ${url}`);
+                log.warn(`      ⚠️ Skipping unparseable image URL: ${url}`);
                 continue;
             }
 
@@ -279,10 +323,10 @@ export class Downloader {
         const processedHtml = rewriteImageSrcs(html, urlToLocalPath);
 
         if (tasks.length > 0) {
-            this.logger.info(`      🖼️  Localizing ${tasks.length} images...`);
+            log.info(`      🖼️  Localizing ${tasks.length} images...`);
             await Promise.all(tasks.map(task =>
                 this.downloadAsset(task.url, task.outputPath).catch(() =>
-                    this.logger.warn(`      ⚠️ Failed to localize image: ${task.url}`)
+                    log.warn(`      ⚠️ Failed to localize image: ${task.url}`)
                 )
             ));
         }

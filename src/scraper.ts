@@ -3,6 +3,7 @@ import fs from 'fs-extra';
 import { createConsoleLogger, type Logger } from './logger.js';
 import { STORAGE_STATE_PATH } from './auth.js';
 import { escapeHtml } from './html-escape.js';
+import { assignResourceFileNames } from './shared.js';
 
 export interface Resource {
     title: string;
@@ -315,8 +316,22 @@ export class Scraper {
         };
     }
 
-    async extractLessonData(url: string): Promise<Lesson> {
+    async extractLessonData(
+        url: string,
+        options: {
+            /** Per-lesson logger (e.g. prefixed) overriding the instance logger. */
+            logger?: Logger;
+            /**
+             * Filenames already present in the lesson's `resources/` folder.
+             * Native resources whose base filename is in this set skip the
+             * signed download-URL API call — the file will not be
+             * re-downloaded anyway.
+             */
+            existingResourceFiles?: Set<string>;
+        } = {}
+    ): Promise<Lesson> {
         if (!this.context) await this.init();
+        const logger = options.logger ?? this.logger;
         const page = await this.context!.newPage();
 
         // try/finally guarantees the page is closed even when extraction throws;
@@ -368,7 +383,7 @@ export class Scraper {
 
             // Native Skool Player Handling (Mux)
             if (!vLink && metadata.videoId) {
-                this.logger.info(`    ℹ️ Native videoId found: ${metadata.videoId}.`);
+                logger.info(`    ℹ️ Native videoId found: ${metadata.videoId}.`);
 
                 try {
                     // Try to find and click the play button/thumbnail to trigger stream signed URL generation
@@ -376,7 +391,7 @@ export class Scraper {
                     const hasPlayButton = await page.evaluate((sel) => !!document.querySelector(sel), playButtonSelector);
 
                     if (hasPlayButton) {
-                        this.logger.info('    🖱️ Clicking play button to initialize stream...');
+                        logger.info('    🖱️ Clicking play button to initialize stream...');
                         await page.click(playButtonSelector);
 
                         // Poll for the stream manifest to appear in network entries or player src
@@ -415,12 +430,12 @@ export class Scraper {
                     if (!vLink) {
                         const videoData = pageProps.video || pageProps.course?.video;
                         if (videoData && videoData.id === metadata.videoId && videoData.playbackId && videoData.playbackToken) {
-                            this.logger.info('    ℹ️ Using reconstructed HLS URL from page props fallback.');
+                            logger.info('    ℹ️ Using reconstructed HLS URL from page props fallback.');
                             vLink = `https://stream.video.skool.com/${videoData.playbackId}.m3u8?token=${videoData.playbackToken}`;
                         }
                     }
                 } catch (err) {
-                    this.logger.warn(`    ⚠️ Interaction-based extraction failed: ${String(err)}`);
+                    logger.warn(`    ⚠️ Interaction-based extraction failed: ${String(err)}`);
                 }
             }
 
@@ -448,7 +463,7 @@ export class Scraper {
                 });
 
             } catch (e) {
-                this.logger.warn(`    ⚠️ Failed to parse metadata resources: ${String(e)}`);
+                logger.warn(`    ⚠️ Failed to parse metadata resources: ${String(e)}`);
             }
 
             // 2. Scrape from DOM to catch external links and any native missing from metadata
@@ -502,12 +517,16 @@ export class Scraper {
                     }
                 }
             } catch (err) {
-                this.logger.warn(`    ⚠️ DOM-based resource scraping failed: ${String(err)}`);
+                logger.warn(`    ⚠️ DOM-based resource scraping failed: ${String(err)}`);
             }
 
             // Fetch download URLs for each native resource using direct API calls
             if (resources.length > 0) {
-                this.logger.info(`    📥 Found ${resources.length} resources. Fetching download URLs...`);
+                logger.info(`    📥 Found ${resources.length} resources. Fetching download URLs...`);
+
+                // Same assignment the downloader uses for local filenames, so
+                // the on-disk check below matches what was actually written.
+                const localNames = assignResourceFileNames(resources);
 
                 for (const res of resources) {
                     // Skip if it's already an external link or already has a download URL
@@ -515,8 +534,16 @@ export class Scraper {
                         continue;
                     }
 
+                    // Skip the API round-trip when the file is already on disk —
+                    // the downloader skips the download anyway.
+                    const localName = localNames.get(res);
+                    if (localName && options.existingResourceFiles?.has(localName)) {
+                        logger.info(`      ⏭️  "${res.title}" already on disk, skipping download URL fetch`);
+                        continue;
+                    }
+
                     try {
-                        this.logger.info(`      🔗 Requesting download URL for "${res.title}"...`);
+                        logger.info(`      🔗 Requesting download URL for "${res.title}"...`);
                         const response = await page.evaluate(async (fileId: string) => {
                             const apiUrl = `https://api2.skool.com/files/${fileId}/download-url?expire=28800`;
                             try {
@@ -534,12 +561,12 @@ export class Scraper {
 
                         if (response.success && response.url) {
                             res.downloadUrl = response.url;
-                            this.logger.info(`      ✅ Got download URL for "${res.title}"`);
+                            logger.info(`      ✅ Got download URL for "${res.title}"`);
                         } else {
-                            this.logger.warn(`      ⚠️ Failed to get download URL for "${res.title}": ${response.error}`);
+                            logger.warn(`      ⚠️ Failed to get download URL for "${res.title}": ${response.error}`);
                         }
                     } catch (err) {
-                        this.logger.warn(`      ⚠️ Error fetching download URL for "${res.title}": ${String(err)}`);
+                        logger.warn(`      ⚠️ Error fetching download URL for "${res.title}": ${String(err)}`);
                     }
                 }
             }
@@ -554,7 +581,7 @@ export class Scraper {
                     const nodes = JSON.parse(jsonPart);
                     body = parseTipTap(nodes);
                 } catch (e) {
-                    this.logger.error(`Failed to parse TipTap content: ${String(e)}`);
+                    logger.error(`Failed to parse TipTap content: ${String(e)}`);
                 }
             }
 

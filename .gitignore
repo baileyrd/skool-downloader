@@ -9,3 +9,10 @@ bin/yt-dlp*
 # (node_modules), not bin/. Kept to ignore leftovers from old checkouts.
 bin/ffmpeg*
 bin/ffprobe*
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/

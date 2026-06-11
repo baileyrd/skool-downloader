@@ -25,6 +25,15 @@ function startServer(handler: http.RequestListener): Promise<{ server: http.Serv
     });
 }
 
+/** Any leftover temp files (with any unique suffix) in `dir`. */
+async function listTmpFiles(dir: string): Promise<string[]> {
+    try {
+        return (await fs.readdir(dir)).filter(name => name.endsWith('.tmp'));
+    } catch {
+        return [];
+    }
+}
+
 describe('Downloader.downloadAsset', () => {
     let tmpDir: string;
     const servers: http.Server[] = [];
@@ -55,7 +64,31 @@ describe('Downloader.downloadAsset', () => {
         await downloader.downloadAsset(`${baseUrl}/pic.png`, outputPath);
 
         expect(await fs.readFile(outputPath, 'utf-8')).toBe(body);
-        expect(fs.existsSync(`${outputPath}.tmp`)).toBe(false);
+        expect(await listTmpFiles(path.dirname(outputPath))).toEqual([]);
+    });
+
+    it('survives concurrent downloads to the same final path (no shared tmp race)', async () => {
+        const body = 'same destination bytes';
+        const { server, baseUrl } = await startServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/markdown' });
+            // Small delay keeps the downloads overlapping.
+            setTimeout(() => res.end(body), 30);
+        });
+        servers.push(server);
+
+        const outputPath = path.join(tmpDir, 'resources', 'SKILL.md');
+        const downloader = new Downloader(silentLogger);
+
+        // Pre-B9 this raced on a shared SKILL.md.tmp: ENOENT crashes and a
+        // missing final file. With per-call tmp names, every call succeeds.
+        await Promise.all([
+            downloader.downloadAsset(`${baseUrl}/a`, outputPath),
+            downloader.downloadAsset(`${baseUrl}/b`, outputPath),
+            downloader.downloadAsset(`${baseUrl}/c`, outputPath)
+        ]);
+
+        expect(await fs.readFile(outputPath, 'utf-8')).toBe(body);
+        expect(await listTmpFiles(path.dirname(outputPath))).toEqual([]);
     });
 
     it('rejects (does not hang) when the response stream errors mid-body, leaving no files', async () => {
@@ -75,7 +108,7 @@ describe('Downloader.downloadAsset', () => {
         ).rejects.toThrow();
 
         expect(fs.existsSync(outputPath)).toBe(false);
-        expect(fs.existsSync(`${outputPath}.tmp`)).toBe(false);
+        expect(await listTmpFiles(path.dirname(outputPath))).toEqual([]);
     }, 4000);
 
     it('skips without contacting the server when a non-empty file already exists', async () => {
@@ -113,7 +146,7 @@ describe('Downloader.downloadAsset', () => {
         ).rejects.toThrow(/HTML page instead of a file/);
 
         expect(fs.existsSync(outputPath)).toBe(false);
-        expect(fs.existsSync(`${outputPath}.tmp`)).toBe(false);
+        expect(await listTmpFiles(path.dirname(outputPath))).toEqual([]);
     });
 
     it('accepts a non-HTML response when rejectHtmlResponse is set', async () => {
@@ -163,6 +196,6 @@ describe('Downloader.downloadAsset', () => {
         ).rejects.toThrow();
 
         expect(fs.existsSync(outputPath)).toBe(false);
-        expect(fs.existsSync(`${outputPath}.tmp`)).toBe(false);
+        expect(await listTmpFiles(path.dirname(outputPath))).toEqual([]);
     });
 });

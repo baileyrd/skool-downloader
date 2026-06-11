@@ -29,7 +29,14 @@ export async function getAuthStatus(): Promise<AuthStatus> {
 
         if (skoolCookies.length === 0) return { status: 'invalid' };
 
-        const expiries = skoolCookies
+        // The `auth_token` cookie is the actual session credential — its
+        // expiry is what determines whether downloads will be authenticated.
+        // Long-lived tracking cookies (client_id etc.) would otherwise make
+        // the max-across-all-cookies estimate wildly optimistic.
+        const sessionCookies = skoolCookies.filter((cookie: any) => cookie?.name === 'auth_token');
+        const relevantCookies = sessionCookies.length > 0 ? sessionCookies : skoolCookies;
+
+        const expiries = relevantCookies
             .map((cookie: any) => Number(cookie?.expires))
             .filter((value: number) => Number.isFinite(value) && value > 0);
 

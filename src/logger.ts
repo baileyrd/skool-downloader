@@ -10,6 +10,20 @@ type LoggerOptions = {
     silent?: boolean;
 };
 
+/**
+ * Wraps a logger so every message carries a prefix (e.g. a `[module.lesson]`
+ * tag). With concurrent lesson downloads the raw console output interleaves;
+ * the prefix keeps each line attributable to its lesson.
+ */
+export function withPrefix(base: Logger, prefix: string): Logger {
+    return {
+        info: (message) => base.info(`${prefix}${message}`),
+        warn: (message) => base.warn(`${prefix}${message}`),
+        error: (message, error) => base.error(`${prefix}${message}`, error),
+        debug: (message) => base.debug(`${prefix}${message}`)
+    };
+}
+
 export function createConsoleLogger(options: LoggerOptions = {}): Logger {
     const { verbose = false, silent = false } = options;
     const noop = () => {};

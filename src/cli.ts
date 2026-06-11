@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs-extra';
 import { Listr, PRESET_TIMER } from 'listr2';
 import { downloadCourse, type DownloadMode } from './index.js';
+import type { VideoQuality } from './downloader.js';
 import { login, getAuthStatus } from './auth.js';
 import { regenerateIndex } from './regenerate-index.js';
 import { regenerateGroupIndex } from './regenerate-group-index.js';
@@ -20,10 +21,12 @@ export type CliArgs = {
     mode?: DownloadMode;
     lessonId?: string | null;
     regenerateDir?: string;
+    force?: boolean;
+    quality?: VideoQuality;
 };
 
 function showHelp() {
-    console.log(`\nSkool Downloader\n\nUsage:\n  skool                          Interactive mode\n  skool login                    Log in to Skool\n  skool <classroom-url>          Download a course\n  skool <group-classroom-url>    Download all courses in a community\n  skool <lesson-url>             Download a single lesson (URL with ?md=)\n  skool regenerate-index         Regenerate all course indexes\n\nOptions:\n  -o, --output <dir>             Output directory (course root)\n  -c, --concurrency <number>     Lesson concurrency (default: 8)\n  --course                       Force course mode (ignore ?md=)\n  --lesson                       Force lesson mode\n  --lesson-id <id>               Explicit lesson id\n  -h, --help                     Show help\n`);
+    console.log(`\nSkool Downloader\n\nUsage:\n  skool                          Interactive mode\n  skool login                    Log in to Skool\n  skool <classroom-url>          Download a course\n  skool <group-classroom-url>    Download all courses in a community\n  skool <lesson-url>             Download a single lesson (URL with ?md=)\n  skool regenerate-index         Regenerate all course indexes\n\nOptions:\n  -o, --output <dir>             Output directory (course root)\n  -c, --concurrency <number>     Lesson concurrency (default: 8)\n  -q, --quality <height|best>    Max video height, e.g. 1080 (default) or 'best'\n  --force                        Re-scrape lessons even if already complete on disk\n  --course                       Force course mode (ignore ?md=)\n  --lesson                       Force lesson mode\n  --lesson-id <id>               Explicit lesson id\n  -h, --help                     Show help\n`);
 }
 
 /**
@@ -52,6 +55,25 @@ export function parseArgs(args: string[]): CliArgs {
         }
         if (arg === '-h' || arg === '--help') {
             parsed.command = 'help';
+            continue;
+        }
+        if (arg === '--force') {
+            parsed.force = true;
+            continue;
+        }
+        if (arg === '-q' || arg === '--quality') {
+            const next = args[i + 1];
+            if (next === 'best') {
+                parsed.quality = 'best';
+            } else {
+                const height = next ? Number.parseInt(next, 10) : Number.NaN;
+                if (Number.isFinite(height) && height > 0) {
+                    parsed.quality = height;
+                } else {
+                    console.error(`Warning: invalid --quality value "${next ?? ''}" ignored (use a height like 1080, or 'best').`);
+                }
+            }
+            i++;
             continue;
         }
         if (arg === '--course') {
@@ -527,7 +549,10 @@ async function runWithArgs(args: CliArgs) {
             const { accessible, locked } = filterAccessibleCourses(library.courses);
 
             if (locked.length > 0) {
-                console.warn(`Skipping ${locked.length} locked course${locked.length === 1 ? '' : 's'} (no access).`);
+                console.warn(`Skipping ${locked.length} locked course${locked.length === 1 ? '' : 's'} (no access):`);
+                for (const course of locked) {
+                    console.warn(`  🔒 ${course.title}`);
+                }
             }
 
             if (accessible.length === 0) {
@@ -541,7 +566,9 @@ async function runWithArgs(args: CliArgs) {
                         url: course.url,
                         outputDir: outputRoot ? resolveCourseOutputDir(outputRoot, library.groupName, course.title) : undefined,
                         concurrency: args.concurrency,
-                        mode: 'course'
+                        mode: 'course',
+                        force: args.force,
+                        quality: args.quality
                     });
                 } catch (err) {
                     failedCourses += 1;
@@ -560,7 +587,9 @@ async function runWithArgs(args: CliArgs) {
             outputDir: args.outputDir,
             concurrency: args.concurrency,
             mode: args.mode,
-            lessonId: args.lessonId
+            lessonId: args.lessonId,
+            force: args.force,
+            quality: args.quality
         });
         return;
     }

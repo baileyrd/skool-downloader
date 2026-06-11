@@ -75,4 +75,28 @@ describe('parseArgs', () => {
         );
         expect(parsed.url).toBe('https://www.skool.com/g/classroom');
     });
+
+    it('parses --force', () => {
+        const parsed = parseArgs(['https://www.skool.com/g/classroom', '--force']);
+        expect(parsed.force).toBe(true);
+        expect(parseArgs(['https://www.skool.com/g/classroom']).force).toBeUndefined();
+    });
+
+    it('parses numeric --quality and -q values', () => {
+        expect(parseArgs(['-q', '720']).quality).toBe(720);
+        expect(parseArgs(['--quality', '1440']).quality).toBe(1440);
+    });
+
+    it("parses --quality best", () => {
+        expect(parseArgs(['--quality', 'best']).quality).toBe('best');
+    });
+
+    it('warns and ignores invalid --quality values', () => {
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const parsed = parseArgs(['--quality', 'potato', 'https://www.skool.com/g/classroom']);
+        expect(parsed.quality).toBeUndefined();
+        expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('potato'));
+        // The invalid value must still be consumed, not parsed as a URL/arg.
+        expect(parsed.url).toBe('https://www.skool.com/g/classroom');
+    });
 });

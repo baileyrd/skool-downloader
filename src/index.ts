@@ -1,10 +1,11 @@
 import { Scraper, Module } from './scraper.js';
-import { Downloader } from './downloader.js';
+import { Downloader, type VideoQuality } from './downloader.js';
 import { regenerateIndex } from './regenerate-index.js';
 import { regenerateGroupIndex } from './regenerate-group-index.js';
-import { createConsoleLogger, type Logger } from './logger.js';
+import { createConsoleLogger, withPrefix, type Logger } from './logger.js';
 import { buildGoogleExportInfo } from './google-export.js';
 import {
+    assignResourceFileNames,
     escapeHtml,
     sanitizeName,
     writeAtomicJson,
@@ -18,8 +19,6 @@ import pLimit from 'p-limit';
 const DEFAULT_CONCURRENCY = 8;
 const MAX_CONCURRENCY = 16;
 
-const indexLimit = pLimit(1);
-const groupIndexLimit = pLimit(1);
 let activeOutputDir: string | null = null;
 let activeGroupDir: string | null = null;
 let shutdownHandlersRegistered = false;
@@ -102,6 +101,14 @@ export type DownloadOptions = {
     callbacks?: DownloadCallbacks;
     suppressIndexLogs?: boolean;
     runTasks?: (tasks: LessonTask[], concurrency: number) => Promise<void>;
+    /**
+     * Re-scrape lessons even when their manifest says they are complete.
+     * Without this, lessons whose video/resources are all on disk are
+     * skipped without opening a browser page (fast resume).
+     */
+    force?: boolean;
+    /** Max video height (default 1080) or 'best' for no cap. */
+    quality?: VideoQuality;
 };
 
 export type DownloadSummary = {
@@ -112,6 +119,10 @@ export type DownloadSummary = {
     lessonsCount: number;
     completedLessons: number;
     failedLessons: number;
+    /** Lessons skipped because they were already complete on disk. */
+    skippedLessons: number;
+    /** Resources that failed to download across all lessons. */
+    failedResources: number;
     targetLessonId: string | null;
 };
 
@@ -181,6 +192,45 @@ async function runConcurrent(tasks: Array<() => Promise<void>>, concurrency: num
     await Promise.all(tasks.map(task => limit(task)));
 }
 
+function fileHasContent(filePath: string): boolean {
+    try {
+        return fs.statSync(filePath).size > 0;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Returns the lesson's manifest when the lesson is verifiably complete on
+ * disk, so the whole lesson can be skipped without opening a browser page.
+ *
+ * "Complete" means: the manifest reports no video/resource failures and
+ * every file it references (index.html, video.mp4 when hasVideo, each entry
+ * of resourceFiles) still exists with content. Manifests written before the
+ * `resourceFiles` field existed cannot prove their resources are on disk,
+ * so they are treated as incomplete and re-scraped once (which upgrades
+ * them).
+ */
+async function readCompleteLessonManifest(lessonDir: string): Promise<LessonManifest | null> {
+    let manifest: LessonManifest;
+    try {
+        manifest = await fs.readJson(path.join(lessonDir, 'lesson.json'));
+    } catch {
+        return null;
+    }
+
+    if (!Array.isArray(manifest.resourceFiles)) return null;
+    if (manifest.videoFailed) return null;
+    if ((manifest.resourceFailures ?? 0) > 0) return null;
+    if (!fs.existsSync(path.join(lessonDir, 'index.html'))) return null;
+    if (manifest.hasVideo && !fileHasContent(path.join(lessonDir, 'video.mp4'))) return null;
+
+    const allResourcesPresent = manifest.resourceFiles.every(name =>
+        fileHasContent(path.join(lessonDir, 'resources', name))
+    );
+    return allResourcesPresent ? manifest : null;
+}
+
 export async function downloadCourse(options: DownloadOptions): Promise<DownloadSummary> {
     const logger = options.logger ?? createConsoleLogger();
     const concurrency = normalizeConcurrency(options.concurrency);
@@ -202,6 +252,8 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
 
     let completedLessons = 0;
     let failedLessons = 0;
+    let skippedLessons = 0;
+    let failedResources = 0;
 
     try {
         logger.info('🚀 Fetching course structure...');
@@ -367,6 +419,8 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                         };
                         const lessonDirName = `${lIndex}-${sanitizeName(lesson.title)}`;
                         const lessonDir = path.join(moduleDir, lessonDirName);
+                        const lessonTag = `[${mInfo.mIndex}.${lIndex}]`;
+                        const lessonLogger = withPrefix(logger, `  ${lessonTag} `);
 
                         options.callbacks?.onLessonStart?.({
                             moduleIndex: mInfo.mIndex,
@@ -374,40 +428,82 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                             lessonTitle: lesson.title
                         });
 
-                        logger.info(`\n  📄 Processing [${mInfo.mIndex}.${lIndex}] ${lesson.title}`);
+                        if (!options.force) {
+                            const existingManifest = await readCompleteLessonManifest(lessonDir);
+                            if (existingManifest) {
+                                skippedLessons += 1;
+                                completedLessons += 1;
+                                logger.info(`  ⏭️  ${lessonTag} ${lesson.title} — already complete, skipping (use --force to re-download)`);
+                                updateStatus('Already complete, skipped.');
+                                options.callbacks?.onLessonComplete?.({
+                                    moduleIndex: mInfo.mIndex,
+                                    lessonIndex: lIndex,
+                                    lessonTitle: lesson.title,
+                                    hasVideo: existingManifest.hasVideo,
+                                    resourcesCount: existingManifest.resourcesCount
+                                });
+                                return;
+                            }
+                        }
+
+                        logger.info(`\n  📄 Processing ${lessonTag} ${lesson.title}`);
 
                         try {
                             updateStatus('Loading lesson data...');
                             await fs.ensureDir(lessonDir);
-                            const lessonData = await scraper.extractLessonData(lesson.url);
+
+                            const resourcesDir = path.join(lessonDir, 'resources');
+                            let existingResourceFiles = new Set<string>();
+                            try {
+                                existingResourceFiles = new Set(await fs.readdir(resourcesDir));
+                            } catch {
+                                // No resources directory yet.
+                            }
+
+                            const lessonData = await scraper.extractLessonData(lesson.url, {
+                                logger: lessonLogger,
+                                existingResourceFiles
+                            });
 
                             updateStatus('Localizing images...');
-                            const localizedHtml = await downloader.localizeImages(lessonData.contentHtml || '', lessonDir);
+                            const localizedHtml = await downloader.localizeImages(lessonData.contentHtml || '', lessonDir, lessonLogger);
 
                             let hasVideo = false;
+                            let videoFailed = false;
                             if (lessonData.videoLink) {
                                 try {
                                     updateStatus('Downloading video...');
-                                    await downloader.downloadVideo(lessonData.videoLink, lessonDir, 'video');
+                                    await downloader.downloadVideo(lessonData.videoLink, lessonDir, 'video', {
+                                        logger: lessonLogger,
+                                        quality: options.quality
+                                    });
                                     hasVideo = true;
                                 } catch (err) {
-                                    logger.warn(`    ⚠️ Failed to download video for ${lesson.title}`);
+                                    videoFailed = true;
+                                    lessonLogger.warn(`    ⚠️ Failed to download video for ${lesson.title}`);
                                 }
                             }
 
                             const resourcesHtml: string[] = [];
+                            const resourceFiles: string[] = [];
+                            let lessonResourceFailures = 0;
                             if (lessonData.resources && lessonData.resources.length > 0) {
-                                const resourcesDir = path.join(lessonDir, 'resources');
                                 await fs.ensureDir(resourcesDir);
 
-                                const resTasks = lessonData.resources.map(async (res) => {
-                                    if (!res.downloadUrl) return null;
+                                // Unique local filename per resource — lessons can
+                                // attach several files with the same name (e.g.
+                                // multiple SKILL.md files).
+                                const resourceFileNames = assignResourceFileNames(lessonData.resources);
 
+                                const resTasks = lessonData.resources.map(async (res) => {
                                     if (res.isExternal) {
+                                        const externalUrl = res.downloadUrl;
+                                        if (!externalUrl) return null;
+
                                         // Google Docs/Sheets/Slides links can be localized via
                                         // their unauthenticated export endpoints; other external
                                         // hosts stay link-only.
-                                        const exportInfo = buildGoogleExportInfo(res.downloadUrl);
+                                        const exportInfo = buildGoogleExportInfo(externalUrl);
                                         if (exportInfo) {
                                             const baseName = sanitizeName(res.title);
                                             const safeFileName = baseName.toLowerCase().endsWith(`.${exportInfo.extension}`)
@@ -416,36 +512,45 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                             const resPath = path.join(resourcesDir, safeFileName);
                                             try {
                                                 updateStatus('Downloading resources...');
-                                                logger.info(`    ⬇️  Exporting Google resource: ${res.title}`);
+                                                lessonLogger.info(`    ⬇️  Exporting Google resource: ${res.title}`);
                                                 await downloader.downloadAsset(exportInfo.exportUrl, resPath, { rejectHtmlResponse: true });
+                                                resourceFiles.push(safeFileName);
                                                 return `<li><a href="resources/${encodeURIComponent(safeFileName)}" target="_blank">${escapeHtml(res.title)}</a></li>`;
                                             } catch (err) {
-                                                logger.warn(`    ⚠️ Could not export Google resource "${res.title}" (sign-in required or download disabled) — keeping external link; offline backup is incomplete.`);
+                                                lessonLogger.warn(`    ⚠️ Could not export Google resource "${res.title}" (sign-in required or download disabled) — keeping external link; offline backup is incomplete.`);
                                             }
                                         }
-                                        logger.info(`    🔗 External resource linked: ${res.title}`);
-                                        return `<li><a href="${escapeHtml(res.downloadUrl)}" target="_blank">${escapeHtml(res.title)} (External)</a></li>`;
+                                        lessonLogger.info(`    🔗 External resource linked: ${res.title}`);
+                                        return `<li><a href="${escapeHtml(externalUrl)}" target="_blank">${escapeHtml(res.title)} (External)</a></li>`;
+                                    }
+
+                                    const safeFileName = resourceFileNames.get(res)!;
+                                    const resPath = path.join(resourcesDir, safeFileName);
+
+                                    if (fileHasContent(resPath)) {
+                                        lessonLogger.info(`    ⏭️  Resource already exists, skipping: ${res.title}`);
+                                        resourceFiles.push(safeFileName);
+                                        return `<li><a href="resources/${encodeURIComponent(safeFileName)}" target="_blank">${escapeHtml(res.title)}</a></li>`;
+                                    }
+
+                                    if (!res.downloadUrl) {
+                                        lessonResourceFailures += 1;
+                                        lessonLogger.warn(`    ⚠️  No download URL for resource ${res.title} — it stays missing from the offline backup.`);
+                                        return `<li>${escapeHtml(res.title)} (not downloaded — no download URL)</li>`;
                                     }
 
                                     try {
                                         updateStatus('Downloading resources...');
-                                        const safeFileName = sanitizeName(res.file_name || res.title);
-                                        const resPath = path.join(resourcesDir, safeFileName);
-
-                                        if (fs.existsSync(resPath)) {
-                                            const stats = fs.statSync(resPath);
-                                            if (stats.size > 0) {
-                                                logger.info(`    ⏭️  Resource already exists, skipping: ${res.title}`);
-                                                return `<li><a href="resources/${encodeURIComponent(safeFileName)}" target="_blank">${escapeHtml(res.title)}</a></li>`;
-                                            }
-                                        }
-
-                                        logger.info(`    ⬇️  Downloading resource: ${res.title}`);
+                                        lessonLogger.info(`    ⬇️  Downloading resource: ${res.title}`);
                                         await downloader.downloadAsset(res.downloadUrl, resPath);
+                                        resourceFiles.push(safeFileName);
                                         return `<li><a href="resources/${encodeURIComponent(safeFileName)}" target="_blank">${escapeHtml(res.title)}</a></li>`;
                                     } catch (err) {
-                                        logger.warn(`    ⚠️  Failed to download resource ${res.title}: ${String(err)}`);
-                                        return null;
+                                        lessonResourceFailures += 1;
+                                        lessonLogger.warn(`    ⚠️  Failed to download resource ${res.title}: ${String(err)}`);
+                                        // Keep the resource visible on the lesson page so the
+                                        // gap is discoverable; re-running the download retries it.
+                                        return `<li>${escapeHtml(res.title)} (download failed — re-run the downloader to retry)</li>`;
                                     }
                                 });
 
@@ -591,12 +696,16 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                     : `${lessonDirName}/index.html`,
                                 hasVideo,
                                 resourcesCount: resourcesHtml.length,
+                                resourceFiles,
+                                videoFailed: videoFailed || undefined,
+                                resourceFailures: lessonResourceFailures || undefined,
                                 updatedAt: new Date().toISOString()
                             };
 
                             await writeAtomicJson(path.join(lessonDir, 'lesson.json'), lessonManifest);
 
                             completedLessons += 1;
+                            failedResources += lessonResourceFailures;
                             options.callbacks?.onLessonComplete?.({
                                 moduleIndex: mInfo.mIndex,
                                 lessonIndex: lIndex,
@@ -604,9 +713,6 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                 hasVideo,
                                 resourcesCount: resourcesHtml.length
                             });
-
-                            updateStatus('Updating course index...');
-                            indexLimit(() => regenerateIndex(baseOutputDir, { silent: options.suppressIndexLogs }));
                         } catch (err) {
                             failedLessons += 1;
                             options.callbacks?.onLessonError?.({
@@ -615,7 +721,7 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                 lessonTitle: lesson.title,
                                 error: err
                             });
-                            logger.error(`    ⚠️ Error processing lesson ${lesson.title}: ${String(err)}`);
+                            lessonLogger.error(`    ⚠️ Error processing lesson ${lesson.title}: ${String(err)}`);
                         }
                     }
                 });
@@ -627,8 +733,11 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
         } else {
             await runConcurrent(tasks.map(task => () => task.run()), concurrency);
         }
-        await indexLimit(() => regenerateIndex(baseOutputDir, { silent: options.suppressIndexLogs }));
-        await groupIndexLimit(() => regenerateGroupIndex(activeGroupDir ?? path.dirname(baseOutputDir), { silent: options.suppressIndexLogs }));
+        // The index is regenerated once per course (plus on SIGINT/SIGTERM via
+        // the shutdown handler) — not after every lesson, which rescanned the
+        // whole tree N times and flooded the log.
+        await regenerateIndex(baseOutputDir, { silent: options.suppressIndexLogs });
+        await regenerateGroupIndex(activeGroupDir ?? path.dirname(baseOutputDir), { silent: options.suppressIndexLogs });
 
         const summary: DownloadSummary = {
             courseName,
@@ -638,12 +747,20 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
             lessonsCount: totalLessons,
             completedLessons,
             failedLessons,
+            skippedLessons,
+            failedResources,
             targetLessonId
         };
 
         options.callbacks?.onCourseComplete?.(summary);
 
         logger.info('\n✨ All downloads complete!');
+        if (skippedLessons > 0) {
+            logger.info(`⏭️  ${skippedLessons} of ${totalLessons} lessons were already complete and skipped (use --force to re-download).`);
+        }
+        if (failedResources > 0) {
+            logger.warn(`⚠️ ${failedResources} resource${failedResources === 1 ? '' : 's'} failed to download — re-run to retry.`);
+        }
         logger.info(`Check your files in: ${baseOutputDir}`);
 
         return summary;
