@@ -111,7 +111,7 @@ downloads/
         └── 1-Module Name/
             ├── 1-Lesson Title/
             │   ├── index.html (The lesson page)
-            │   ├── video.mp4
+            │   ├── 1 - Lesson Title.mp4
             │   ├── assets/ (Localized images)
             │   └── resources/ (Attachments)
             └── ...

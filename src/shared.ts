@@ -39,6 +39,32 @@ export function sanitizeName(value: string): string {
 }
 
 /**
+ * Longest allowed stem (name without extension) for a lesson video file.
+ * The lesson title already appears in the folder name, so an uncapped stem
+ * roughly doubles the title's contribution to the path — risky against
+ * Windows' 260-char path limit on deep trees.
+ */
+const VIDEO_STEM_MAX_LENGTH = 60;
+
+/**
+ * Builds the lesson video filename: `<lessonIndex> - <sanitized title>.mp4`,
+ * with the stem truncated to a safe length. The index prefix keeps videos
+ * sorted when collected into a flat playlist. (Legacy archives used a bare
+ * `video.mp4`; readers must fall back to that name when the manifest has no
+ * `videoFile` entry.)
+ */
+export function buildVideoFileName(lessonIndex: number, title: string): string {
+    let stem = `${lessonIndex} - ${sanitizeName(title)}`;
+    if (stem.length > VIDEO_STEM_MAX_LENGTH) {
+        stem = stem.slice(0, VIDEO_STEM_MAX_LENGTH).replace(/[. ]+$/, '');
+    }
+    if (stem.length === 0) {
+        stem = `${lessonIndex} - video`;
+    }
+    return `${stem}.mp4`;
+}
+
+/**
  * Minimal structural shape of a lesson resource for filename assignment.
  * (Matches `Resource` from the scraper without importing it — avoids a
  * module cycle.)
@@ -137,6 +163,11 @@ export type LessonManifest = {
     lessonDirName: string;
     relativePath: string;
     hasVideo: boolean;
+    /**
+     * Local filename of the lesson video. Absent on manifests written before
+     * title-based video names; those lessons store the video as `video.mp4`.
+     */
+    videoFile?: string;
     resourcesCount: number;
     /**
      * Local filenames (within `resources/`) of successfully downloaded

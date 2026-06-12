@@ -177,14 +177,14 @@ export class Downloader {
     async downloadVideo(
         url: string,
         outputDir: string,
-        filename: string,
+        fileName: string,
         options: { logger?: Logger; quality?: VideoQuality } = {}
     ) {
         if (!this.ytDlp) await this.init();
         const logger = options.logger ?? this.logger;
 
         await fs.ensureDir(outputDir);
-        const outputPath = path.join(outputDir, `${filename}.mp4`);
+        const outputPath = path.join(outputDir, fileName);
 
         // Skip if video already exists
         if (fs.existsSync(outputPath)) {

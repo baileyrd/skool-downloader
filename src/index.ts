@@ -6,6 +6,7 @@ import { createConsoleLogger, withPrefix, type Logger } from './logger.js';
 import { buildGoogleExportInfo } from './google-export.js';
 import {
     assignResourceFileNames,
+    buildVideoFileName,
     escapeHtml,
     sanitizeName,
     writeAtomicJson,
@@ -223,7 +224,9 @@ async function readCompleteLessonManifest(lessonDir: string): Promise<LessonMani
     if (manifest.videoFailed) return null;
     if ((manifest.resourceFailures ?? 0) > 0) return null;
     if (!fs.existsSync(path.join(lessonDir, 'index.html'))) return null;
-    if (manifest.hasVideo && !fileHasContent(path.join(lessonDir, 'video.mp4'))) return null;
+    // Manifests written before title-based video names have no videoFile
+    // entry; their videos live at the legacy `video.mp4`.
+    if (manifest.hasVideo && !fileHasContent(path.join(lessonDir, manifest.videoFile ?? 'video.mp4'))) return null;
 
     const allResourcesPresent = manifest.resourceFiles.every(name =>
         fileHasContent(path.join(lessonDir, 'resources', name))
@@ -473,10 +476,17 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                             // counts: the manifest must not claim completeness, so
                             // the next run retries the lesson.
                             let videoFailed = Boolean(lessonData.videoExtractionFailed);
+                            // Title-based video name; archives downloaded before this
+                            // scheme keep their `video.mp4` and are never re-fetched.
+                            let videoFile = buildVideoFileName(lIndex, lesson.title);
+                            if (!fileHasContent(path.join(lessonDir, videoFile)) &&
+                                fileHasContent(path.join(lessonDir, 'video.mp4'))) {
+                                videoFile = 'video.mp4';
+                            }
                             if (lessonData.videoLink) {
                                 try {
                                     updateStatus('Downloading video...');
-                                    await downloader.downloadVideo(lessonData.videoLink, lessonDir, 'video', {
+                                    await downloader.downloadVideo(lessonData.videoLink, lessonDir, videoFile, {
                                         logger: lessonLogger,
                                         quality: options.quality
                                     });
@@ -662,7 +672,7 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                     </div>
                                     <div class="container">
                                         <h1>${escapeHtml(lessonData.title)}</h1>
-                                        ${hasVideo ? '<video controls src="video.mp4"></video>' : ''}
+                                        ${hasVideo ? `<video controls src="${encodeURIComponent(videoFile)}"></video>` : ''}
                                         <div class="content">
                                             ${localizedHtml}
                                         </div>
@@ -698,6 +708,7 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                     ? `${mInfo.moduleDirName}/${lessonDirName}/index.html`
                                     : `${lessonDirName}/index.html`,
                                 hasVideo,
+                                videoFile: hasVideo ? videoFile : undefined,
                                 resourcesCount: resourcesHtml.length,
                                 resourceFiles,
                                 videoFailed: videoFailed || undefined,

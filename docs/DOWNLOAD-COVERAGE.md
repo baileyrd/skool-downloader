@@ -9,7 +9,7 @@ For each lesson in a classroom (`src/index.ts`, lesson task):
 
 | Content | Destination | How |
 |---------|-------------|-----|
-| Video | `video.mp4` | yt-dlp, capped at 1080p preferring H.264/AAC for player compatibility (override with `--quality <height\|best>`), streams merged via bundled ffmpeg, `+faststart` applied (`src/downloader.ts` `downloadVideo`) |
+| Video | `<lessonIndex> - <title>.mp4` (stem capped at 60 chars; legacy archives keep `video.mp4` — migrate with `skool migrate-video-names <dir>`) | yt-dlp, capped at 1080p preferring H.264/AAC for player compatibility (override with `--quality <height\|best>`), streams merged via bundled ffmpeg, `+faststart` applied (`src/downloader.ts` `downloadVideo`) |
 | Lesson text/body | `index.html` | Scraped rich-text content rendered into a styled offline page; embedded code blocks are preserved as part of the body |
 | Images in lesson content | `assets/` | Every `<img src>` is downloaded and the HTML rewritten to the local copy (`src/downloader.ts` `localizeImages`) |
 | Native file attachments | `resources/` | Download URL fetched per `file_id` from Skool's file API, then streamed to disk (`src/scraper.ts` resource extraction, `src/downloader.ts` `downloadAsset`) |

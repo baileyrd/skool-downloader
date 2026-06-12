@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { assignResourceFileNames, sanitizeName } from '../src/shared.js';
+import { assignResourceFileNames, buildVideoFileName, sanitizeName } from '../src/shared.js';
 
 describe('sanitizeName', () => {
     it('replaces illegal filename characters with dashes', () => {
@@ -48,6 +48,31 @@ describe('sanitizeName', () => {
         expect(sanitizeName('')).toBe('_');
         expect(sanitizeName('   ')).toBe('_');
         expect(sanitizeName('...')).toBe('_');
+    });
+});
+
+describe('buildVideoFileName', () => {
+    it('builds "<index> - <title>.mp4"', () => {
+        expect(buildVideoFileName(2, 'Next Steps')).toBe('2 - Next Steps.mp4');
+    });
+
+    it('sanitizes filesystem-unsafe characters in the title', () => {
+        expect(buildVideoFileName(1, 'Free VS Paid Group: What You Get!'))
+            .toBe('1 - Free VS Paid Group- What You Get!.mp4');
+    });
+
+    it('truncates long stems and strips trailing dots/spaces left by the cut', () => {
+        const name = buildVideoFileName(28, `${'A'.repeat(50)}. ${'B'.repeat(50)}`);
+        expect(name.endsWith('.mp4')).toBe(true);
+        // stem (without extension) capped at 60 chars
+        expect(name.length).toBeLessThanOrEqual(64);
+        expect(name).not.toMatch(/[. ]\.mp4$/);
+    });
+
+    it('never returns a bare extension for degenerate titles', () => {
+        const name = buildVideoFileName(3, '...');
+        expect(name).toMatch(/\.mp4$/);
+        expect(name.replace(/\.mp4$/, '').trim().length).toBeGreaterThan(0);
     });
 });
 

@@ -76,6 +76,12 @@ describe('parseArgs', () => {
         expect(parsed.url).toBe('https://www.skool.com/g/classroom');
     });
 
+    it('captures the migrate-video-names directory', () => {
+        const parsed = parseArgs(['migrate-video-names', 'Z:\\skool_downloads']);
+        expect(parsed.command).toBe('migrate-video-names');
+        expect(parsed.migrateDir).toBe('Z:\\skool_downloads');
+    });
+
     it('parses --force', () => {
         const parsed = parseArgs(['https://www.skool.com/g/classroom', '--force']);
         expect(parsed.force).toBe(true);

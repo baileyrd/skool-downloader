@@ -9,12 +9,14 @@ import type { VideoQuality } from './downloader.js';
 import { login, getAuthStatus } from './auth.js';
 import { regenerateIndex } from './regenerate-index.js';
 import { regenerateGroupIndex } from './regenerate-group-index.js';
+import { migrateVideoNames } from './migrate-video-names.js';
 import { Scraper, type CourseLibraryResult, type CourseListItem } from './scraper.js';
 import { sanitizeName } from './shared.js';
 import type { Logger } from './logger.js';
 
 export type CliArgs = {
-    command?: 'login' | 'download' | 'regenerate-index' | 'help';
+    command?: 'login' | 'download' | 'regenerate-index' | 'migrate-video-names' | 'help';
+    migrateDir?: string;
     url?: string;
     outputDir?: string;
     concurrency?: number;
@@ -26,7 +28,7 @@ export type CliArgs = {
 };
 
 function showHelp() {
-    console.log(`\nSkool Downloader\n\nUsage:\n  skool                          Interactive mode\n  skool login                    Log in to Skool\n  skool <classroom-url>          Download a course\n  skool <group-classroom-url>    Download all courses in a community\n  skool <lesson-url>             Download a single lesson (URL with ?md=)\n  skool regenerate-index         Regenerate all course indexes\n\nOptions:\n  -o, --output <dir>             Output directory (course root)\n  -c, --concurrency <number>     Lesson concurrency (default: 8)\n  -q, --quality <height|best>    Max video height, e.g. 1080 (default) or 'best'\n  --force                        Re-scrape lessons even if already complete on disk\n  --course                       Force course mode (ignore ?md=)\n  --lesson                       Force lesson mode\n  --lesson-id <id>               Explicit lesson id\n  -h, --help                     Show help\n`);
+    console.log(`\nSkool Downloader\n\nUsage:\n  skool                          Interactive mode\n  skool login                    Log in to Skool\n  skool <classroom-url>          Download a course\n  skool <group-classroom-url>    Download all courses in a community\n  skool <lesson-url>             Download a single lesson (URL with ?md=)\n  skool regenerate-index         Regenerate all course indexes\n  skool migrate-video-names <dir>  Rename legacy video.mp4 files to lesson-title names\n\nOptions:\n  -o, --output <dir>             Output directory (course root)\n  -c, --concurrency <number>     Lesson concurrency (default: 8)\n  -q, --quality <height|best>    Max video height, e.g. 1080 (default) or 'best'\n  --force                        Re-scrape lessons even if already complete on disk\n  --course                       Force course mode (ignore ?md=)\n  --lesson                       Force lesson mode\n  --lesson-id <id>               Explicit lesson id\n  -h, --help                     Show help\n`);
 }
 
 /**
@@ -49,6 +51,14 @@ export function parseArgs(args: string[]): CliArgs {
             parsed.command = 'regenerate-index';
             if (args[i + 1] !== undefined) {
                 parsed.regenerateDir = args[i + 1];
+                i++;
+            }
+            continue;
+        }
+        if (arg === 'migrate-video-names') {
+            parsed.command = 'migrate-video-names';
+            if (args[i + 1] !== undefined) {
+                parsed.migrateDir = args[i + 1];
                 i++;
             }
             continue;
@@ -460,7 +470,7 @@ async function runInteractive() {
                 if (lessonDestination) {
                     log.info(`Lesson folder: ${lessonDestination.lessonOutputDir}`);
                     log.info(`Lesson page: ${path.join(lessonDestination.lessonOutputDir, 'index.html')}`);
-                    log.info('Lesson assets: video.mp4 (if present) and resources/ folder');
+                    log.info('Lesson assets: "<lesson title>.mp4" video (if present) and resources/ folder');
                 }
             }
         }
@@ -532,6 +542,12 @@ async function runWithArgs(args: CliArgs) {
 
         await regenerateIndex(args.regenerateDir);
         await regenerateGroupIndex(path.dirname(args.regenerateDir));
+        return;
+    }
+
+    if (args.command === 'migrate-video-names') {
+        const rootDir = args.migrateDir || path.join(process.cwd(), 'downloads');
+        await migrateVideoNames(rootDir);
         return;
     }
 
