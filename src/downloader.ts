@@ -35,24 +35,11 @@ export type VideoProgress = {
 };
 
 // At the default lesson concurrency of 8, each yt-dlp process fetching 8
-// fragments (-N 8) means up to 64 simultaneous connections to YouTube —
-// well into bot-detection/throttling territory. Cap concurrent YouTube
-// downloads; Skool-native streams (Mux/CloudFront) tolerate parallelism
-// fine and stay gated only by lesson concurrency.
-const youtubeProcessLimit = pLimit(3);
-
-/**
- * Returns true when `url` points at YouTube (youtube.com, music/m/www
- * subdomains, or youtu.be short links). Exported for unit testing.
- */
-export function isYouTubeUrl(url: string): boolean {
-    try {
-        const host = new URL(url).hostname.toLowerCase();
-        return host === 'youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com');
-    } catch {
-        return false;
-    }
-}
+// fragments (-N 8) means up to 64 simultaneous connections to one video
+// host — well into throttling territory. YouTube bot-detects it and Loom
+// has answered it with sustained HTTP 500s, so the cap applies to every
+// yt-dlp download regardless of host.
+const videoProcessLimit = pLimit(3);
 
 /**
  * Strips the query string and hash from a URL for logging. Skool's HLS
@@ -155,6 +142,11 @@ export function buildVideoArgs(
         '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         '--merge-output-format', 'mp4',
         '-N', '8',
+        // Throttling hosts (Loom returns sustained HTTP 500s) burn the
+        // default instant retries in seconds; exponential backoff up to 30s
+        // gives the host time to stop refusing.
+        '--retry-sleep', 'fragment:exp=1:30',
+        '--retry-sleep', 'http:exp=1:30',
         '--postprocessor-args', 'ffmpeg:-movflags +faststart'
     ];
 
@@ -203,6 +195,12 @@ export class Downloader {
         return this.initPromise;
     }
 
+    /**
+     * Download a video via yt-dlp. Returns whether bytes were actually
+     * fetched (`downloaded: false` means a non-empty file already existed),
+     * so callers can report new media instead of conflating fetches with
+     * skips.
+     */
     async downloadVideo(
         url: string,
         outputDir: string,
@@ -213,7 +211,7 @@ export class Downloader {
             /** Called with each yt-dlp progress line (percent, speed, ETA). */
             onProgress?: (progress: VideoProgress) => void;
         } = {}
-    ) {
+    ): Promise<{ downloaded: boolean; bytes: number }> {
         if (!this.ytDlp) await this.init();
         const logger = options.logger ?? this.logger;
 
@@ -225,7 +223,7 @@ export class Downloader {
             const stats = fs.statSync(outputPath);
             if (stats.size > 0) {
                 logger.info(`    ⏭️  Video already exists, skipping download (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
-                return;
+                return { downloaded: false, bytes: stats.size };
             }
         }
 
@@ -272,12 +270,10 @@ export class Downloader {
         });
 
         try {
-            if (isYouTubeUrl(url)) {
-                await youtubeProcessLimit(execWithProgress);
-            } else {
-                await execWithProgress();
-            }
+            await videoProcessLimit(execWithProgress);
             logger.info(`    ✅ Video downloaded to ${outputDir}`);
+            const stats = await fs.stat(outputPath).catch(() => null);
+            return { downloaded: true, bytes: stats?.size ?? 0 };
         } catch (error) {
             logger.error(`    ⚠️ Error downloading video: ${String(error)}`);
             throw error;
@@ -295,6 +291,9 @@ export class Downloader {
      * Resolves immediately (without contacting the server) if a non-empty file
      * already exists at the final path.
      *
+     * Returns `true` when bytes were fetched, `false` when an existing file
+     * made the download unnecessary.
+     *
      * @param url - The asset URL to download.
      * @param outputPath - Absolute path the asset should land at.
      * @param options.rejectHtmlResponse - Throw if the server responds with
@@ -306,7 +305,7 @@ export class Downloader {
         url: string,
         outputPath: string,
         options: { rejectHtmlResponse?: boolean } = {}
-    ): Promise<void> {
+    ): Promise<boolean> {
         await fs.ensureDir(path.dirname(outputPath));
 
         // Skip if asset already exists. Sound because partial downloads only
@@ -314,7 +313,7 @@ export class Downloader {
         if (fs.existsSync(outputPath)) {
             const stats = fs.statSync(outputPath);
             if (stats.size > 0) {
-                return; // Silently skip, caller will handle messaging
+                return false; // Silently skip, caller will handle messaging
             }
         }
 
@@ -366,6 +365,7 @@ export class Downloader {
             await fs.remove(tmpPath).catch(() => undefined);
             throw error;
         }
+        return true;
     }
 
     async localizeImages(html: string, outputDir: string, logger?: Logger): Promise<string> {

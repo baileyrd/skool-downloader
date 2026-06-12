@@ -3,6 +3,7 @@ import { Downloader, type VideoQuality } from './downloader.js';
 import { regenerateIndex } from './regenerate-index.js';
 import { regenerateGroupIndex } from './regenerate-group-index.js';
 import { reconcileLessonDirs, type ExpectedLesson } from './reconcile-lessons.js';
+import { extractGroupSlug, reconcileGroupDir } from './reconcile-group.js';
 import { createConsoleLogger, withPrefix, type Logger } from './logger.js';
 import { buildGoogleExportInfo } from './google-export.js';
 import {
@@ -10,6 +11,7 @@ import {
     buildVideoFileName,
     escapeHtml,
     fileHasContent,
+    formatBytes,
     isLessonDirComplete,
     sanitizeName,
     writeAtomicJson,
@@ -144,6 +146,12 @@ export type DownloadSummary = {
      * failed) even though the lesson itself completed.
      */
     failedVideos: number;
+    /** Videos actually fetched this run (existing files don't count). */
+    downloadedVideos: number;
+    /** Total size in bytes of videos fetched this run. */
+    downloadedVideoBytes: number;
+    /** Resources actually fetched this run (existing files don't count). */
+    downloadedResources: number;
     /** Folders moved to a new index-title name by the reconcile pass. */
     movedLessonDirs: number;
     /** Duplicate lesson folders removed by the reconcile pass. */
@@ -262,6 +270,9 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
     let skippedLessons = 0;
     let failedResources = 0;
     let failedVideos = 0;
+    let downloadedVideos = 0;
+    let downloadedVideoBytes = 0;
+    let downloadedResources = 0;
 
     try {
         logger.info('🚀 Fetching course structure...');
@@ -307,6 +318,19 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
             options.outputDir && options.outputDir !== 'undefined'
                 ? options.outputDir
                 : undefined;
+        // On the default path this tool owns the group folder layout, so a
+        // group renamed on Skool (or archived under its URL slug by an older
+        // version) is moved to the current display name instead of being
+        // re-downloaded from scratch. An explicit outputDir is the caller's
+        // layout — callers like the multi-course CLI reconcile their own root.
+        if (!outputOverride) {
+            await reconcileGroupDir(
+                path.join(process.cwd(), 'downloads'),
+                groupName,
+                extractGroupSlug(classroomUrl),
+                logger
+            );
+        }
         const baseOutputDir = outputOverride || defaultOutputDir;
         if (!baseOutputDir) {
             throw new Error('Output directory resolution failed.');
@@ -519,7 +543,7 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                             if (lessonData.videoLink) {
                                 try {
                                     updateStatus('Downloading video...');
-                                    await downloader.downloadVideo(lessonData.videoLink, lessonDir, videoFile, {
+                                    const videoResult = await downloader.downloadVideo(lessonData.videoLink, lessonDir, videoFile, {
                                         logger: lessonLogger,
                                         quality: options.quality,
                                         onProgress: (progress) => {
@@ -531,6 +555,10 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                         }
                                     });
                                     hasVideo = true;
+                                    if (videoResult.downloaded) {
+                                        downloadedVideos += 1;
+                                        downloadedVideoBytes += videoResult.bytes;
+                                    }
                                 } catch (err) {
                                     videoFailed = true;
                                     lessonLogger.warn(`    ⚠️ Failed to download video for ${lesson.title}`);
@@ -566,7 +594,9 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                             try {
                                                 updateStatus('Downloading resources...');
                                                 lessonLogger.info(`    ⬇️  Exporting Google resource: ${res.title}`);
-                                                await downloader.downloadAsset(exportInfo.exportUrl, resPath, { rejectHtmlResponse: true });
+                                                if (await downloader.downloadAsset(exportInfo.exportUrl, resPath, { rejectHtmlResponse: true })) {
+                                                    downloadedResources += 1;
+                                                }
                                                 resourceFiles.push(safeFileName);
                                                 return `<li><a href="resources/${encodeURIComponent(safeFileName)}" target="_blank">${escapeHtml(res.title)}</a></li>`;
                                             } catch (err) {
@@ -595,7 +625,9 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                     try {
                                         updateStatus('Downloading resources...');
                                         lessonLogger.info(`    ⬇️  Downloading resource: ${res.title}`);
-                                        await downloader.downloadAsset(res.downloadUrl, resPath);
+                                        if (await downloader.downloadAsset(res.downloadUrl, resPath)) {
+                                            downloadedResources += 1;
+                                        }
                                         resourceFiles.push(safeFileName);
                                         return `<li><a href="resources/${encodeURIComponent(safeFileName)}" target="_blank">${escapeHtml(res.title)}</a></li>`;
                                     } catch (err) {
@@ -807,6 +839,9 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
             skippedLessons,
             failedResources,
             failedVideos,
+            downloadedVideos,
+            downloadedVideoBytes,
+            downloadedResources,
             movedLessonDirs: reconcile.movedDirs,
             removedDuplicateDirs: reconcile.removedDuplicates,
             orphanLessonDirs: reconcile.orphanDirs.length,
@@ -816,6 +851,11 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
         options.callbacks?.onCourseComplete?.(summary);
 
         logger.info('\n✨ All downloads complete!');
+        if (downloadedVideos > 0 || downloadedResources > 0) {
+            logger.info(`⬇️  New media: ${downloadedVideos} video${downloadedVideos === 1 ? '' : 's'} (${formatBytes(downloadedVideoBytes)}), ${downloadedResources} resource${downloadedResources === 1 ? '' : 's'}.`);
+        } else if (completedLessons - skippedLessons > 0) {
+            logger.info('⬇️  No new media — existing files verified.');
+        }
         if (skippedLessons > 0) {
             logger.info(`⏭️  ${skippedLessons} of ${totalLessons} lessons were already complete and skipped (use --force to re-download).`);
         }

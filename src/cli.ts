@@ -11,8 +11,9 @@ import { regenerateIndex } from './regenerate-index.js';
 import { regenerateGroupIndex } from './regenerate-group-index.js';
 import { migrateVideoNames } from './migrate-video-names.js';
 import { Scraper, type CourseLibraryResult, type CourseListItem } from './scraper.js';
-import { sanitizeName } from './shared.js';
-import type { Logger } from './logger.js';
+import { formatBytes, sanitizeName } from './shared.js';
+import { createConsoleLogger, type Logger } from './logger.js';
+import { extractGroupSlug, reconcileGroupDir } from './reconcile-group.js';
 
 export type CliArgs = {
     command?: 'login' | 'download' | 'regenerate-index' | 'migrate-video-names' | 'help';
@@ -265,17 +266,25 @@ function printRunSummary(
 
     const lessons = total(s => s.lessonsCount);
     const skipped = total(s => s.skippedLessons);
-    const downloaded = total(s => s.completedLessons) - skipped;
+    const processed = total(s => s.completedLessons) - skipped;
     const failedLessons = total(s => s.failedLessons);
     const failedVideos = total(s => s.failedVideos);
     const failedResources = total(s => s.failedResources);
+    const newVideos = total(s => s.downloadedVideos);
+    const newVideoBytes = total(s => s.downloadedVideoBytes);
+    const newResources = total(s => s.downloadedResources);
     const moved = total(s => s.movedLessonDirs);
     const removedDuplicates = total(s => s.removedDuplicateDirs);
     const orphans = total(s => s.orphanLessonDirs);
 
     print('\n──── Run summary ────');
     print(`Courses: ${summaries.length} completed, ${failedCourses} failed, ${lockedCourses} locked (skipped)`);
-    print(`Lessons: ${lessons} total — ${downloaded} downloaded, ${skipped} already complete, ${failedLessons} failed`);
+    print(`Lessons: ${lessons} total — ${processed} processed, ${skipped} already complete, ${failedLessons} failed`);
+    if (newVideos > 0 || newResources > 0) {
+        print(`New media: ${newVideos} video${newVideos === 1 ? '' : 's'} (${formatBytes(newVideoBytes)}), ${newResources} resource${newResources === 1 ? '' : 's'}`);
+    } else if (processed > 0) {
+        print('New media: none — processed lessons only refreshed metadata, existing files verified.');
+    }
     if (failedVideos > 0 || failedResources > 0) {
         print(`Missing from backup: ${failedVideos} videos, ${failedResources} resources — re-run to retry.`);
     }
@@ -450,6 +459,15 @@ async function runInteractive() {
 
             let failedCourses = 0;
             const summaries: DownloadSummary[] = [];
+
+            if (outputRoot) {
+                await reconcileGroupDir(outputRoot, library.groupName, extractGroupSlug(url), {
+                    info: (message) => log.info(message),
+                    warn: (message) => log.warn(message),
+                    error: (message) => log.error(message),
+                    debug: () => {}
+                });
+            }
 
             for (const course of selectedCourses) {
                 log.info(`\n${pc.bold(course.title)} ${pc.dim(`· ${library.groupName}`)}`);
@@ -626,8 +644,10 @@ async function runWithArgs(args: CliArgs) {
             const logger = buildInteractiveLogger();
             // One browser for the whole run: the library fetch and every
             // course download share it instead of relaunching Chromium per
-            // course.
-            const sharedScraper = new Scraper(logger);
+            // course. A console logger (not the quiet clack one) keeps the
+            // scraper's per-course lines ("Navigating to...", "Course
+            // detected: ...") in this flow's plain-console output.
+            const sharedScraper = new Scraper(createConsoleLogger());
             try {
                 const library = await fetchCourseLibrary(args.url, logger, sharedScraper);
                 const outputRoot = args.outputDir && args.outputDir !== 'undefined' ? args.outputDir : undefined;
@@ -647,7 +667,15 @@ async function runWithArgs(args: CliArgs) {
                     return;
                 }
 
+                // A group renamed on Skool (or archived under its URL slug
+                // by an older version) gets its existing folder renamed here
+                // instead of the whole community re-downloading into a new one.
+                if (outputRoot) {
+                    await reconcileGroupDir(outputRoot, library.groupName, extractGroupSlug(args.url), createConsoleLogger());
+                }
+
                 for (const course of accessible) {
+                    console.log(pc.bold(`\n📘 ${course.title}`));
                     try {
                         const summary = await downloadCourse({
                             url: course.url,

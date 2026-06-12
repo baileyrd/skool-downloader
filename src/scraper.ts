@@ -157,9 +157,15 @@ export class Scraper {
             throw new Error('Course structure not found in __NEXT_DATA__');
         }
 
-        // Extract Group (Community) Name
+        // Extract Group (Community) Name. Must match parseCourseLibrary's
+        // derivation (displayName first) — the two feed the same group folder
+        // name, and disagreeing here splits the archive across two folders.
         const groupData = pageProps.currentGroup || {};
-        const groupName = groupData.metadata?.name || groupData.name || 'Unknown Group';
+        const groupName =
+            groupData.metadata?.displayName ||
+            groupData.metadata?.name ||
+            groupData.name ||
+            'Unknown Group';
 
         // Extract Course Name
         let courseName = 'Unknown Course';

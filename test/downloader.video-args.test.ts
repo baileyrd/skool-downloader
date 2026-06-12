@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildVideoArgs, isYouTubeUrl, redactUrlForLog } from '../src/downloader.js';
+import { buildVideoArgs, redactUrlForLog } from '../src/downloader.js';
 
 const URL = 'https://stream.mux.com/abc123.m3u8';
 const OUTPUT = '/tmp/out/video.mp4';
@@ -46,6 +46,15 @@ describe('buildVideoArgs', () => {
         expect(args[0]).toBe(URL);
         expect(args[args.indexOf('-o') + 1]).toBe(OUTPUT);
         expect(args[args.indexOf('--merge-output-format') + 1]).toBe('mp4');
+    });
+
+    it('backs off exponentially on fragment and http retries', () => {
+        const args = buildVideoArgs(URL, OUTPUT);
+
+        // Loom answers parallel-download bursts with sustained HTTP 500s;
+        // without backoff yt-dlp burns its retries in seconds and gives up.
+        const sleeps = args.filter((_, i) => args[i - 1] === '--retry-sleep');
+        expect(sleeps).toEqual(['fragment:exp=1:30', 'http:exp=1:30']);
     });
 
     it('never disables TLS certificate verification', () => {
@@ -106,23 +115,3 @@ describe('redactUrlForLog', () => {
     });
 });
 
-describe('isYouTubeUrl', () => {
-    it('matches youtu.be short links and youtube.com hosts', () => {
-        expect(isYouTubeUrl('https://youtu.be/abc123')).toBe(true);
-        expect(isYouTubeUrl('https://www.youtube.com/watch?v=abc123')).toBe(true);
-        expect(isYouTubeUrl('https://youtube.com/watch?v=abc123')).toBe(true);
-        expect(isYouTubeUrl('https://music.youtube.com/watch?v=abc123')).toBe(true);
-    });
-
-    it('does not match Skool-native streams or lookalike hosts', () => {
-        expect(isYouTubeUrl('https://stream.video.skool.com/abc.m3u8?token=x')).toBe(false);
-        expect(isYouTubeUrl('https://stream.mux.com/abc123.m3u8')).toBe(false);
-        // Suffix tricks must not count as YouTube.
-        expect(isYouTubeUrl('https://notyoutube.com/watch?v=abc')).toBe(false);
-        expect(isYouTubeUrl('https://youtube.com.evil.example/watch')).toBe(false);
-    });
-
-    it('returns false for unparseable input', () => {
-        expect(isYouTubeUrl('not a url')).toBe(false);
-    });
-});

@@ -61,8 +61,9 @@ describe('Downloader.downloadAsset', () => {
         const outputPath = path.join(tmpDir, 'assets', 'pic.png');
         const downloader = new Downloader(silentLogger);
 
-        await downloader.downloadAsset(`${baseUrl}/pic.png`, outputPath);
+        const downloaded = await downloader.downloadAsset(`${baseUrl}/pic.png`, outputPath);
 
+        expect(downloaded).toBe(true);
         expect(await fs.readFile(outputPath, 'utf-8')).toBe(body);
         expect(await listTmpFiles(path.dirname(outputPath))).toEqual([]);
     });
@@ -125,8 +126,9 @@ describe('Downloader.downloadAsset', () => {
         await fs.writeFile(outputPath, 'pre-existing content');
 
         const downloader = new Downloader(silentLogger);
-        await downloader.downloadAsset(`${baseUrl}/existing.png`, outputPath);
+        const downloaded = await downloader.downloadAsset(`${baseUrl}/existing.png`, outputPath);
 
+        expect(downloaded).toBe(false);
         expect(requestCount).toBe(0);
         expect(await fs.readFile(outputPath, 'utf-8')).toBe('pre-existing content');
     });

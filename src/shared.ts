@@ -135,6 +135,18 @@ export async function writeAtomicHtml(filePath: string, content: string): Promis
 }
 
 /**
+ * Shape of the `.group.json` manifest written to each group directory. The
+ * slug (the group's immutable URL segment, e.g. `spookluke-vault-2637`)
+ * identifies the folder across display-name changes, the same way lessonId
+ * identifies lesson folders across index shifts.
+ */
+export type GroupManifest = {
+    slug: string;
+    groupName: string;
+    updatedAt: string;
+};
+
+/**
  * Shape of the `.course.json` manifest written to each course directory.
  */
 export type CourseManifest = {
@@ -150,6 +162,15 @@ export type CourseManifest = {
     }>;
     updatedAt: string;
 };
+
+/**
+ * Formats a byte count for human-readable summaries: MB below 1 GiB,
+ * GB above.
+ */
+export function formatBytes(bytes: number): string {
+    const mb = bytes / (1024 * 1024);
+    return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+}
 
 /**
  * Returns true when `filePath` exists with at least one byte of content.

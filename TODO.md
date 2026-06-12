@@ -47,3 +47,6 @@
 - [x] **One shared Chromium** across the library fetch and all course downloads in multi-course runs.
 - [x] **Group index regenerated once per run** in multi-course flows instead of after every course.
 - [x] **Fail fast without a TTY** when login is needed (no hanging `confirm()` in cron/CI).
+- [x] **Group-folder reconcile** (`src/reconcile-group.ts`): rename a group folder identified by its URL slug (legacy slug-named folders or `.group.json` match) when the display name differs, instead of re-downloading the whole community; warn on split archives. Unified `parseClassroom`/`parseCourseLibrary` group-name derivation (displayName first).
+- [x] **Global yt-dlp process cap** (3 concurrent, any host — Loom rate-limits too, not just YouTube) plus `--retry-sleep` exponential backoff for fragment/http retries.
+- [x] **Honest download accounting**: summaries report `processed` vs `New media: N videos (size), M resources` instead of calling metadata refreshes "downloaded".

@@ -11,8 +11,9 @@ const silentLogger = createConsoleLogger({ silent: true });
 class StubDownloader extends Downloader {
     downloads: { url: string; outputPath: string }[] = [];
 
-    override async downloadAsset(url: string, outputPath: string): Promise<void> {
+    override async downloadAsset(url: string, outputPath: string): Promise<boolean> {
         this.downloads.push({ url, outputPath });
+        return true;
     }
 }
 

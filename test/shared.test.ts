@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
-import { assignResourceFileNames, buildVideoFileName, sanitizeName } from '../src/shared.js';
+import { assignResourceFileNames, buildVideoFileName, formatBytes, sanitizeName } from '../src/shared.js';
+
+describe('formatBytes', () => {
+    it('formats sub-GiB sizes in MB', () => {
+        expect(formatBytes(310 * 1024 * 1024)).toBe('310.0 MB');
+        expect(formatBytes(0)).toBe('0.0 MB');
+    });
+
+    it('formats GiB-scale sizes in GB', () => {
+        expect(formatBytes(4.5 * 1024 * 1024 * 1024)).toBe('4.50 GB');
+    });
+});
 
 describe('sanitizeName', () => {
     it('replaces illegal filename characters with dashes', () => {

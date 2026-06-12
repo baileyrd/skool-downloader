@@ -1,7 +1,7 @@
 import fs from 'fs-extra';
 import path from 'path';
 
-import { escapeHtml, writeAtomicHtml, type CourseManifest } from './shared.js';
+import { escapeHtml, writeAtomicHtml, type CourseManifest, type GroupManifest } from './shared.js';
 
 type GroupIndexCourse = {
     dirName: string;
@@ -128,7 +128,18 @@ async function regenerateGroupIndex(
         return;
     }
 
-    const groupName = resolvedGroupName || path.basename(groupDir);
+    // .group.json carries the group's current display name; .course.json
+    // copies can be stale after a group rename (until each course is
+    // re-scraped), so the group manifest wins.
+    let groupManifestName: string | null = null;
+    try {
+        const groupManifest: GroupManifest = await fs.readJson(path.join(groupDir, '.group.json'));
+        groupManifestName = groupManifest?.groupName || null;
+    } catch {
+        // No group manifest — pre-reconcile archive.
+    }
+
+    const groupName = groupManifestName || resolvedGroupName || path.basename(groupDir);
 
     courses.sort((a, b) => {
         if (a.updatedAt && b.updatedAt) {
