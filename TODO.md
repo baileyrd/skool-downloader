@@ -34,3 +34,16 @@
     - [x] Allow optional selection of specific courses
     - [x] Integrate into interactive CLI
     - [x] Save course with image, and navigable HTML for each course (with image), as well as all courses for the community. (make sure update hooks are solid)
+
+## 🔁 Resume & Run Efficiency (2026-06-12)
+- [x] **lessonId-based reconcile pass** (`src/reconcile-lessons.ts`)
+    - [x] Rename lesson folders (and index-prefixed videos + page `<video src>`) when course-order shifts change their index, instead of re-downloading.
+    - [x] Remove duplicate folders for the same lessonId once a complete copy is in place.
+    - [x] Report orphan folders whose lesson no longer exists in the course (never auto-deleted).
+- [x] **Aggregate run summary** after multi-course downloads (courses/lessons/videos/resources, reconcile stats).
+- [x] **Count failed videos in the summary** (`failedVideos`) instead of burying them in scrollback.
+- [x] **yt-dlp progress** surfaced via events (Listr status line + 25/50/75% log lines) instead of silent `execPromise`.
+- [x] **Cap concurrent YouTube downloads** (3 processes) to stay clear of throttling; Skool-native streams unaffected.
+- [x] **One shared Chromium** across the library fetch and all course downloads in multi-course runs.
+- [x] **Group index regenerated once per run** in multi-course flows instead of after every course.
+- [x] **Fail fast without a TTY** when login is needed (no hanging `confirm()` in cron/CI).

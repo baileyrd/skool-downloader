@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildVideoArgs, redactUrlForLog } from '../src/downloader.js';
+import { buildVideoArgs, isYouTubeUrl, redactUrlForLog } from '../src/downloader.js';
 
 const URL = 'https://stream.mux.com/abc123.m3u8';
 const OUTPUT = '/tmp/out/video.mp4';
@@ -103,5 +103,26 @@ describe('redactUrlForLog', () => {
         const junk = 'not a url '.repeat(20);
         const redacted = redactUrlForLog(junk);
         expect(redacted.length).toBeLessThanOrEqual(100);
+    });
+});
+
+describe('isYouTubeUrl', () => {
+    it('matches youtu.be short links and youtube.com hosts', () => {
+        expect(isYouTubeUrl('https://youtu.be/abc123')).toBe(true);
+        expect(isYouTubeUrl('https://www.youtube.com/watch?v=abc123')).toBe(true);
+        expect(isYouTubeUrl('https://youtube.com/watch?v=abc123')).toBe(true);
+        expect(isYouTubeUrl('https://music.youtube.com/watch?v=abc123')).toBe(true);
+    });
+
+    it('does not match Skool-native streams or lookalike hosts', () => {
+        expect(isYouTubeUrl('https://stream.video.skool.com/abc.m3u8?token=x')).toBe(false);
+        expect(isYouTubeUrl('https://stream.mux.com/abc123.m3u8')).toBe(false);
+        // Suffix tricks must not count as YouTube.
+        expect(isYouTubeUrl('https://notyoutube.com/watch?v=abc')).toBe(false);
+        expect(isYouTubeUrl('https://youtube.com.evil.example/watch')).toBe(false);
+    });
+
+    it('returns false for unparseable input', () => {
+        expect(isYouTubeUrl('not a url')).toBe(false);
     });
 });

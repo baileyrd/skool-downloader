@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs-extra';
 import { Listr, PRESET_TIMER } from 'listr2';
-import { downloadCourse, type DownloadMode } from './index.js';
+import { downloadCourse, type DownloadMode, type DownloadSummary } from './index.js';
 import type { VideoQuality } from './downloader.js';
 import { login, getAuthStatus } from './auth.js';
 import { regenerateIndex } from './regenerate-index.js';
@@ -182,6 +182,17 @@ async function ensureLogin(): Promise<boolean> {
         promptMessage = 'Saved login could not be validated. Log in again now?';
     }
 
+    // Without a terminal (cron, CI, piped stdin) a confirm() prompt hangs
+    // forever — and the login flow needs a visible browser anyway. Fail fast
+    // with instructions instead.
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        log.error(
+            `${promptMessage.split('?')[0]}. ` +
+            'Run `skool login` in an interactive terminal first, then retry.'
+        );
+        return false;
+    }
+
     const shouldLogin = await confirm({ message: promptMessage, initialValue: true });
     handleCancel(shouldLogin);
 
@@ -225,12 +236,54 @@ function createTaskRunner() {
     };
 }
 
-async function fetchCourseLibrary(url: string, logger: Logger): Promise<CourseLibraryResult> {
-    const scraper = new Scraper(logger);
+async function fetchCourseLibrary(url: string, logger: Logger, scraper?: Scraper): Promise<CourseLibraryResult> {
+    // With a caller-provided scraper the browser stays open for the course
+    // downloads that follow; otherwise launch and close one here.
+    if (scraper) {
+        return scraper.parseCourseLibrary(url);
+    }
+    const ownScraper = new Scraper(logger);
     try {
-        return await scraper.parseCourseLibrary(url);
+        return await ownScraper.parseCourseLibrary(url);
     } finally {
-        await scraper.close();
+        await ownScraper.close();
+    }
+}
+
+/**
+ * Prints a run-wide summary after a multi-course download, so per-course
+ * results that scrolled past are rolled up in one place.
+ */
+function printRunSummary(
+    summaries: DownloadSummary[],
+    failedCourses: number,
+    lockedCourses: number,
+    print: (message: string) => void = console.log
+) {
+    const total = (pick: (s: DownloadSummary) => number) =>
+        summaries.reduce((sum, s) => sum + pick(s), 0);
+
+    const lessons = total(s => s.lessonsCount);
+    const skipped = total(s => s.skippedLessons);
+    const downloaded = total(s => s.completedLessons) - skipped;
+    const failedLessons = total(s => s.failedLessons);
+    const failedVideos = total(s => s.failedVideos);
+    const failedResources = total(s => s.failedResources);
+    const moved = total(s => s.movedLessonDirs);
+    const removedDuplicates = total(s => s.removedDuplicateDirs);
+    const orphans = total(s => s.orphanLessonDirs);
+
+    print('\n──── Run summary ────');
+    print(`Courses: ${summaries.length} completed, ${failedCourses} failed, ${lockedCourses} locked (skipped)`);
+    print(`Lessons: ${lessons} total — ${downloaded} downloaded, ${skipped} already complete, ${failedLessons} failed`);
+    if (failedVideos > 0 || failedResources > 0) {
+        print(`Missing from backup: ${failedVideos} videos, ${failedResources} resources — re-run to retry.`);
+    }
+    if (moved > 0 || removedDuplicates > 0) {
+        print(`Reconciled: ${moved} folders renamed (index shift), ${removedDuplicates} duplicates removed.`);
+    }
+    if (orphans > 0) {
+        print(`${orphans} folder${orphans === 1 ? '' : 's'} on disk no longer exist in their course (kept; see warnings above).`);
     }
 }
 
@@ -341,92 +394,104 @@ async function runInteractive() {
         const outputDirValue = typeof outputDir === 'string' ? outputDir.trim() : '';
         const outputRoot = outputDirValue.length > 0 ? outputDirValue : undefined;
 
-        const librarySpinner = spinner();
-        librarySpinner.start('Fetching courses...');
-        let library: CourseLibraryResult;
+        // One browser for the library fetch and every selected course.
+        const sharedScraper = new Scraper(interactiveLogger);
         try {
-            library = await fetchCourseLibrary(url, interactiveLogger);
-            librarySpinner.stop(`Found ${library.courses.length} courses.`);
-        } catch (err) {
-            librarySpinner.stop('Failed to fetch courses.');
-            log.error(`Unable to load course list: ${String(err)}`);
-            outro('Could not fetch courses.');
-            return;
-        }
-
-        const { accessible, locked } = filterAccessibleCourses(library.courses);
-        if (accessible.length === 0) {
-            log.warn('No accessible courses found to download.');
-            outro('Nothing to download.');
-            return;
-        }
-
-        if (locked.length > 0) {
-            log.warn(`Locked courses (no access):`);
-            for (const course of locked) {
-                log.warn(`  🔒 ${course.title}`);
-            }
-        }
-
-        const courseOptions = accessible.map(course => ({
-            value: course.key,
-            label: course.title,
-            hint: buildCourseHint(course)
-        }));
-
-        const accessibleKeys = new Set(accessible.map(course => course.key));
-
-        const selection = await multiselect({
-            message: 'Select courses to download',
-            options: courseOptions,
-            initialValues: courseOptions.map(option => option.value).filter(key => accessibleKeys.has(key))
-        });
-        handleCancel(selection);
-
-        const selectedKeys = new Set(selection as string[]);
-        const selectedCourses = accessible.filter(course => selectedKeys.has(course.key));
-
-        if (selectedCourses.length === 0) {
-            log.warn('No courses selected.');
-            outro('Nothing to download.');
-            return;
-        }
-
-        let failedCourses = 0;
-
-        for (const course of selectedCourses) {
-            log.info(`\n${pc.bold(course.title)} ${pc.dim(`· ${library.groupName}`)}`);
+            const librarySpinner = spinner();
+            librarySpinner.start('Fetching courses...');
+            let library: CourseLibraryResult;
             try {
-                const summary = await downloadCourse({
-                    url: course.url,
-                    outputDir: outputRoot ? resolveCourseOutputDir(outputRoot, library.groupName, course.title) : undefined,
-                    concurrency,
-                    mode: 'course',
-                    logger: interactiveLogger,
-                    suppressIndexLogs: true,
-                    runTasks,
-                    callbacks: {
-                        onCourseStart: ({ modulesCount, lessonsCount, outputDir: resolvedDir }) => {
-                            log.info(`${modulesCount} modules · ${lessonsCount} lessons`);
-                            log.info(`Course will save to: ${resolvedDir}`);
-                        }
-                    }
-                });
-
-                if (summary.failedLessons > 0) {
-                    log.warn(`${summary.failedLessons} lessons had errors. You can rerun the download to fill gaps.`);
-                }
+                library = await fetchCourseLibrary(url, interactiveLogger, sharedScraper);
+                librarySpinner.stop(`Found ${library.courses.length} courses.`);
             } catch (err) {
-                failedCourses += 1;
-                log.error(`Failed to download course ${course.title}: ${String(err)}`);
+                librarySpinner.stop('Failed to fetch courses.');
+                log.error(`Unable to load course list: ${String(err)}`);
+                outro('Could not fetch courses.');
+                return;
             }
-        }
 
-        if (failedCourses > 0) {
-            log.warn(`${failedCourses} courses failed. You can rerun to fill gaps.`);
-        }
+            const { accessible, locked } = filterAccessibleCourses(library.courses);
+            if (accessible.length === 0) {
+                log.warn('No accessible courses found to download.');
+                outro('Nothing to download.');
+                return;
+            }
 
-        outro('All selected courses processed.');
+            if (locked.length > 0) {
+                log.warn(`Locked courses (no access):`);
+                for (const course of locked) {
+                    log.warn(`  🔒 ${course.title}`);
+                }
+            }
+
+            const courseOptions = accessible.map(course => ({
+                value: course.key,
+                label: course.title,
+                hint: buildCourseHint(course)
+            }));
+
+            const accessibleKeys = new Set(accessible.map(course => course.key));
+
+            const selection = await multiselect({
+                message: 'Select courses to download',
+                options: courseOptions,
+                initialValues: courseOptions.map(option => option.value).filter(key => accessibleKeys.has(key))
+            });
+            handleCancel(selection);
+
+            const selectedKeys = new Set(selection as string[]);
+            const selectedCourses = accessible.filter(course => selectedKeys.has(course.key));
+
+            if (selectedCourses.length === 0) {
+                log.warn('No courses selected.');
+                outro('Nothing to download.');
+                return;
+            }
+
+            let failedCourses = 0;
+            const summaries: DownloadSummary[] = [];
+
+            for (const course of selectedCourses) {
+                log.info(`\n${pc.bold(course.title)} ${pc.dim(`· ${library.groupName}`)}`);
+                try {
+                    const summary = await downloadCourse({
+                        url: course.url,
+                        outputDir: outputRoot ? resolveCourseOutputDir(outputRoot, library.groupName, course.title) : undefined,
+                        concurrency,
+                        mode: 'course',
+                        logger: interactiveLogger,
+                        suppressIndexLogs: true,
+                        runTasks,
+                        scraper: sharedScraper,
+                        skipGroupIndex: true,
+                        callbacks: {
+                            onCourseStart: ({ modulesCount, lessonsCount, outputDir: resolvedDir }) => {
+                                log.info(`${modulesCount} modules · ${lessonsCount} lessons`);
+                                log.info(`Course will save to: ${resolvedDir}`);
+                            }
+                        }
+                    });
+                    summaries.push(summary);
+
+                    if (summary.failedLessons > 0) {
+                        log.warn(`${summary.failedLessons} lessons had errors. You can rerun the download to fill gaps.`);
+                    }
+                } catch (err) {
+                    failedCourses += 1;
+                    log.error(`Failed to download course ${course.title}: ${String(err)}`);
+                }
+            }
+
+            if (summaries.length > 0) {
+                await regenerateGroupIndex(path.dirname(summaries[0].outputDir), { silent: true });
+            }
+
+            printRunSummary(summaries, failedCourses, locked.length, (message) => log.info(message));
+
+            outro('All selected courses processed.');
+        } finally {
+            await sharedScraper.close();
+        }
         return;
     }
 
@@ -559,41 +624,57 @@ async function runWithArgs(args: CliArgs) {
         }
         if (isClassroomRootUrl(args.url)) {
             const logger = buildInteractiveLogger();
-            const library = await fetchCourseLibrary(args.url, logger);
-            const outputRoot = args.outputDir && args.outputDir !== 'undefined' ? args.outputDir : undefined;
-            let failedCourses = 0;
-            const { accessible, locked } = filterAccessibleCourses(library.courses);
+            // One browser for the whole run: the library fetch and every
+            // course download share it instead of relaunching Chromium per
+            // course.
+            const sharedScraper = new Scraper(logger);
+            try {
+                const library = await fetchCourseLibrary(args.url, logger, sharedScraper);
+                const outputRoot = args.outputDir && args.outputDir !== 'undefined' ? args.outputDir : undefined;
+                let failedCourses = 0;
+                const summaries: DownloadSummary[] = [];
+                const { accessible, locked } = filterAccessibleCourses(library.courses);
 
-            if (locked.length > 0) {
-                console.warn(`Skipping ${locked.length} locked course${locked.length === 1 ? '' : 's'} (no access):`);
-                for (const course of locked) {
-                    console.warn(`  🔒 ${course.title}`);
+                if (locked.length > 0) {
+                    console.warn(`Skipping ${locked.length} locked course${locked.length === 1 ? '' : 's'} (no access):`);
+                    for (const course of locked) {
+                        console.warn(`  🔒 ${course.title}`);
+                    }
                 }
-            }
 
-            if (accessible.length === 0) {
-                console.warn('No accessible courses found to download.');
-                return;
-            }
-
-            for (const course of accessible) {
-                try {
-                    await downloadCourse({
-                        url: course.url,
-                        outputDir: outputRoot ? resolveCourseOutputDir(outputRoot, library.groupName, course.title) : undefined,
-                        concurrency: args.concurrency,
-                        mode: 'course',
-                        force: args.force,
-                        quality: args.quality
-                    });
-                } catch (err) {
-                    failedCourses += 1;
-                    console.error(`Failed to download course ${course.title}: ${String(err)}`);
+                if (accessible.length === 0) {
+                    console.warn('No accessible courses found to download.');
+                    return;
                 }
-            }
 
-            if (failedCourses > 0) {
-                console.warn(`${failedCourses} courses failed.`);
+                for (const course of accessible) {
+                    try {
+                        const summary = await downloadCourse({
+                            url: course.url,
+                            outputDir: outputRoot ? resolveCourseOutputDir(outputRoot, library.groupName, course.title) : undefined,
+                            concurrency: args.concurrency,
+                            mode: 'course',
+                            force: args.force,
+                            quality: args.quality,
+                            scraper: sharedScraper,
+                            // Regenerated once after the loop instead of
+                            // rescanning every course directory per course.
+                            skipGroupIndex: true
+                        });
+                        summaries.push(summary);
+                    } catch (err) {
+                        failedCourses += 1;
+                        console.error(`Failed to download course ${course.title}: ${String(err)}`);
+                    }
+                }
+
+                if (summaries.length > 0) {
+                    await regenerateGroupIndex(path.dirname(summaries[0].outputDir));
+                }
+
+                printRunSummary(summaries, failedCourses, locked.length);
+            } finally {
+                await sharedScraper.close();
             }
             return;
         }

@@ -5,6 +5,7 @@
  */
 
 import fs from 'fs-extra';
+import path from 'path';
 
 export { escapeHtml } from './html-escape.js';
 
@@ -149,6 +150,40 @@ export type CourseManifest = {
     }>;
     updatedAt: string;
 };
+
+/**
+ * Returns true when `filePath` exists with at least one byte of content.
+ */
+export function fileHasContent(filePath: string): boolean {
+    try {
+        return fs.statSync(filePath).size > 0;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Returns whether a lesson directory is verifiably complete on disk per its
+ * manifest: no recorded video/resource failures, and every file the manifest
+ * references (index.html, the video when hasVideo, each resourceFiles entry)
+ * exists with content. Manifests written before the `resourceFiles` field
+ * cannot prove their resources are on disk, so they count as incomplete.
+ *
+ * Single source of truth for the fast-resume skip and the lessonId-based
+ * reconcile pass — the two must agree on what "complete" means.
+ */
+export function isLessonDirComplete(lessonDir: string, manifest: LessonManifest): boolean {
+    if (!Array.isArray(manifest.resourceFiles)) return false;
+    if (manifest.videoFailed) return false;
+    if ((manifest.resourceFailures ?? 0) > 0) return false;
+    if (!fs.existsSync(path.join(lessonDir, 'index.html'))) return false;
+    // Manifests written before title-based video names have no videoFile
+    // entry; their videos live at the legacy `video.mp4`.
+    if (manifest.hasVideo && !fileHasContent(path.join(lessonDir, manifest.videoFile ?? 'video.mp4'))) return false;
+    return manifest.resourceFiles.every(name =>
+        fileHasContent(path.join(lessonDir, 'resources', name))
+    );
+}
 
 /**
  * Shape of the `lesson.json` manifest written to each lesson directory.

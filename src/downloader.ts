@@ -3,6 +3,7 @@ import ffmpegStaticPkg from 'ffmpeg-static';
 import path from 'path';
 import fs from 'fs-extra';
 import axios from 'axios';
+import pLimit from 'p-limit';
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'stream';
 import { pipeline } from 'node:stream/promises';
@@ -24,6 +25,34 @@ const IMG_SRC_REGEX = /(<img[^>]+src=")([^">]+)(")/g;
 export type VideoQuality = number | 'best';
 
 export const DEFAULT_VIDEO_QUALITY: VideoQuality = 1080;
+
+/** Progress snapshot emitted by yt-dlp while a video downloads. */
+export type VideoProgress = {
+    percent?: number;
+    totalSize?: string;
+    currentSpeed?: string;
+    eta?: string;
+};
+
+// At the default lesson concurrency of 8, each yt-dlp process fetching 8
+// fragments (-N 8) means up to 64 simultaneous connections to YouTube —
+// well into bot-detection/throttling territory. Cap concurrent YouTube
+// downloads; Skool-native streams (Mux/CloudFront) tolerate parallelism
+// fine and stay gated only by lesson concurrency.
+const youtubeProcessLimit = pLimit(3);
+
+/**
+ * Returns true when `url` points at YouTube (youtube.com, music/m/www
+ * subdomains, or youtu.be short links). Exported for unit testing.
+ */
+export function isYouTubeUrl(url: string): boolean {
+    try {
+        const host = new URL(url).hostname.toLowerCase();
+        return host === 'youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com');
+    } catch {
+        return false;
+    }
+}
 
 /**
  * Strips the query string and hash from a URL for logging. Skool's HLS
@@ -178,7 +207,12 @@ export class Downloader {
         url: string,
         outputDir: string,
         fileName: string,
-        options: { logger?: Logger; quality?: VideoQuality } = {}
+        options: {
+            logger?: Logger;
+            quality?: VideoQuality;
+            /** Called with each yt-dlp progress line (percent, speed, ETA). */
+            onProgress?: (progress: VideoProgress) => void;
+        } = {}
     ) {
         if (!this.ytDlp) await this.init();
         const logger = options.logger ?? this.logger;
@@ -214,8 +248,35 @@ export class Downloader {
             quality: options.quality
         });
 
+        // exec (vs execPromise) exposes yt-dlp's progress lines as events, so
+        // long downloads are no longer silent for minutes. The wrapper emits
+        // exactly one of 'close' (exit 0) or 'error' per process.
+        const execWithProgress = () => new Promise<void>((resolve, reject) => {
+            let lastLoggedQuarter = 0;
+            this.ytDlp!.exec(args)
+                .on('progress', (progress: VideoProgress) => {
+                    options.onProgress?.(progress);
+                    const percent = Number(progress.percent);
+                    if (!Number.isFinite(percent)) return;
+                    // Keep console noise low: one line at 25/50/75%.
+                    const quarter = Math.floor(percent / 25);
+                    if (quarter > lastLoggedQuarter && quarter < 4) {
+                        lastLoggedQuarter = quarter;
+                        const speed = progress.currentSpeed ? ` @ ${progress.currentSpeed}` : '';
+                        const eta = progress.eta ? `, ETA ${progress.eta}` : '';
+                        logger.info(`    … ${quarter * 25}%${speed}${eta}`);
+                    }
+                })
+                .on('error', (error: Error) => reject(error))
+                .on('close', () => resolve());
+        });
+
         try {
-            await this.ytDlp!.execPromise(args);
+            if (isYouTubeUrl(url)) {
+                await youtubeProcessLimit(execWithProgress);
+            } else {
+                await execWithProgress();
+            }
             logger.info(`    ✅ Video downloaded to ${outputDir}`);
         } catch (error) {
             logger.error(`    ⚠️ Error downloading video: ${String(error)}`);

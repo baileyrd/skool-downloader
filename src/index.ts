@@ -2,12 +2,15 @@ import { Scraper, Module } from './scraper.js';
 import { Downloader, type VideoQuality } from './downloader.js';
 import { regenerateIndex } from './regenerate-index.js';
 import { regenerateGroupIndex } from './regenerate-group-index.js';
+import { reconcileLessonDirs, type ExpectedLesson } from './reconcile-lessons.js';
 import { createConsoleLogger, withPrefix, type Logger } from './logger.js';
 import { buildGoogleExportInfo } from './google-export.js';
 import {
     assignResourceFileNames,
     buildVideoFileName,
     escapeHtml,
+    fileHasContent,
+    isLessonDirComplete,
     sanitizeName,
     writeAtomicJson,
     type CourseManifest,
@@ -110,6 +113,18 @@ export type DownloadOptions = {
     force?: boolean;
     /** Max video height (default 1080) or 'best' for no cap. */
     quality?: VideoQuality;
+    /**
+     * Reuse an existing scraper (and its browser) instead of launching a
+     * fresh Chromium per course. The caller keeps ownership: the scraper is
+     * not closed when the download finishes.
+     */
+    scraper?: Scraper;
+    /**
+     * Skip regenerating the group-level index. Multi-course runs pass this
+     * and regenerate the group index once at the end instead of rescanning
+     * every course directory after each course.
+     */
+    skipGroupIndex?: boolean;
 };
 
 export type DownloadSummary = {
@@ -124,6 +139,17 @@ export type DownloadSummary = {
     skippedLessons: number;
     /** Resources that failed to download across all lessons. */
     failedResources: number;
+    /**
+     * Lessons whose video is missing from the backup (extraction or download
+     * failed) even though the lesson itself completed.
+     */
+    failedVideos: number;
+    /** Folders moved to a new index-title name by the reconcile pass. */
+    movedLessonDirs: number;
+    /** Duplicate lesson folders removed by the reconcile pass. */
+    removedDuplicateDirs: number;
+    /** Folders on disk whose lesson no longer exists in the course. */
+    orphanLessonDirs: number;
     targetLessonId: string | null;
 };
 
@@ -193,21 +219,10 @@ async function runConcurrent(tasks: Array<() => Promise<void>>, concurrency: num
     await Promise.all(tasks.map(task => limit(task)));
 }
 
-function fileHasContent(filePath: string): boolean {
-    try {
-        return fs.statSync(filePath).size > 0;
-    } catch {
-        return false;
-    }
-}
-
 /**
  * Returns the lesson's manifest when the lesson is verifiably complete on
- * disk, so the whole lesson can be skipped without opening a browser page.
- *
- * "Complete" means: the manifest reports no video/resource failures and
- * every file it references (index.html, video.mp4 when hasVideo, each entry
- * of resourceFiles) still exists with content. Manifests written before the
+ * disk (see {@link isLessonDirComplete}), so the whole lesson can be skipped
+ * without opening a browser page. Manifests written before the
  * `resourceFiles` field existed cannot prove their resources are on disk,
  * so they are treated as incomplete and re-scraped once (which upgrades
  * them).
@@ -219,19 +234,7 @@ async function readCompleteLessonManifest(lessonDir: string): Promise<LessonMani
     } catch {
         return null;
     }
-
-    if (!Array.isArray(manifest.resourceFiles)) return null;
-    if (manifest.videoFailed) return null;
-    if ((manifest.resourceFailures ?? 0) > 0) return null;
-    if (!fs.existsSync(path.join(lessonDir, 'index.html'))) return null;
-    // Manifests written before title-based video names have no videoFile
-    // entry; their videos live at the legacy `video.mp4`.
-    if (manifest.hasVideo && !fileHasContent(path.join(lessonDir, manifest.videoFile ?? 'video.mp4'))) return null;
-
-    const allResourcesPresent = manifest.resourceFiles.every(name =>
-        fileHasContent(path.join(lessonDir, 'resources', name))
-    );
-    return allResourcesPresent ? manifest : null;
+    return isLessonDirComplete(lessonDir, manifest) ? manifest : null;
 }
 
 export async function downloadCourse(options: DownloadOptions): Promise<DownloadSummary> {
@@ -250,13 +253,15 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
     const targetLessonId = resolveTargetLessonId(classroomUrl, mode, options.lessonId);
     classroomUrl = classroomUrl.split('?')[0];
 
-    const scraper = new Scraper(logger);
+    const scraper = options.scraper ?? new Scraper(logger);
+    const ownsScraper = !options.scraper;
     const downloader = new Downloader(logger);
 
     let completedLessons = 0;
     let failedLessons = 0;
     let skippedLessons = 0;
     let failedResources = 0;
+    let failedVideos = 0;
 
     try {
         logger.info('🚀 Fetching course structure...');
@@ -400,6 +405,34 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
 
         await writeAtomicJson(path.join(baseOutputDir, '.course.json'), courseManifest);
 
+        // Reconcile existing folders with the fetched structure BEFORE any
+        // download decision: courses that insert lessons at the top shift
+        // every index, and without this rename pass each shift re-downloads
+        // the entire course into duplicate folders.
+        const expectedLessons: ExpectedLesson[] = modules.flatMap((module, i) => {
+            const mInfo = courseInfo[i];
+            return module.lessons.map(lesson => ({
+                lessonId: lesson.id,
+                lessonIndex: lesson.index ?? 1,
+                title: lesson.title,
+                moduleIndex: mInfo.mIndex,
+                moduleTitle: mInfo.title,
+                moduleDirName: mInfo.moduleDirName
+            }));
+        });
+        const reconcile = await reconcileLessonDirs(baseOutputDir, expectedLessons, {
+            logger,
+            // Single-lesson mode only knows about one lesson; everything else
+            // on disk would be falsely reported as orphaned.
+            reportOrphans: !targetLessonId
+        });
+        if (reconcile.movedDirs > 0 || reconcile.removedDuplicates > 0) {
+            logger.info(
+                `🔀 Reconciled lesson folders: ${reconcile.movedDirs} moved (index shift), ` +
+                `${reconcile.removedDuplicates} duplicates removed, ${reconcile.renamedVideos} videos renamed.`
+            );
+        }
+
         const tasks: LessonTask[] = [];
 
         for (let i = 0; i < modules.length; i++) {
@@ -488,7 +521,14 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                     updateStatus('Downloading video...');
                                     await downloader.downloadVideo(lessonData.videoLink, lessonDir, videoFile, {
                                         logger: lessonLogger,
-                                        quality: options.quality
+                                        quality: options.quality,
+                                        onProgress: (progress) => {
+                                            const percent = Number(progress.percent);
+                                            if (!Number.isFinite(percent)) return;
+                                            const speed = progress.currentSpeed ? ` @ ${progress.currentSpeed}` : '';
+                                            const eta = progress.eta ? `, ETA ${progress.eta}` : '';
+                                            updateStatus(`Downloading video... ${Math.floor(percent)}%${speed}${eta}`);
+                                        }
                                     });
                                     hasVideo = true;
                                 } catch (err) {
@@ -720,6 +760,7 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
 
                             completedLessons += 1;
                             failedResources += lessonResourceFailures;
+                            if (videoFailed) failedVideos += 1;
                             options.callbacks?.onLessonComplete?.({
                                 moduleIndex: mInfo.mIndex,
                                 lessonIndex: lIndex,
@@ -751,7 +792,9 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
         // the shutdown handler) — not after every lesson, which rescanned the
         // whole tree N times and flooded the log.
         await regenerateIndex(baseOutputDir, { silent: options.suppressIndexLogs });
-        await regenerateGroupIndex(activeGroupDir ?? path.dirname(baseOutputDir), { silent: options.suppressIndexLogs });
+        if (!options.skipGroupIndex) {
+            await regenerateGroupIndex(activeGroupDir ?? path.dirname(baseOutputDir), { silent: options.suppressIndexLogs });
+        }
 
         const summary: DownloadSummary = {
             courseName,
@@ -763,6 +806,10 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
             failedLessons,
             skippedLessons,
             failedResources,
+            failedVideos,
+            movedLessonDirs: reconcile.movedDirs,
+            removedDuplicateDirs: reconcile.removedDuplicates,
+            orphanLessonDirs: reconcile.orphanDirs.length,
             targetLessonId
         };
 
@@ -772,6 +819,9 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
         if (skippedLessons > 0) {
             logger.info(`⏭️  ${skippedLessons} of ${totalLessons} lessons were already complete and skipped (use --force to re-download).`);
         }
+        if (failedVideos > 0) {
+            logger.warn(`⚠️ ${failedVideos} video${failedVideos === 1 ? '' : 's'} missing from the backup (extraction or download failed) — re-run to retry.`);
+        }
         if (failedResources > 0) {
             logger.warn(`⚠️ ${failedResources} resource${failedResources === 1 ? '' : 's'} failed to download — re-run to retry.`);
         }
@@ -779,6 +829,8 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
 
         return summary;
     } finally {
-        await scraper.close();
+        if (ownsScraper) {
+            await scraper.close();
+        }
     }
 }
