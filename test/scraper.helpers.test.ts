@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseTipTap, resolveClassroomRootUrl } from '../src/scraper.js';
+import { parseMembershipsFromSelf, parseTipTap, resolveClassroomRootUrl } from '../src/scraper.js';
 
 describe('resolveClassroomRootUrl', () => {
     it('strips a course slug after /classroom', () => {
@@ -102,5 +102,27 @@ describe('parseTipTap structure', () => {
 
     it('renders unknown leaf nodes as an empty string', () => {
         expect(parseTipTap([{ type: 'mysteryLeaf' }])).toBe('');
+    });
+});
+
+describe('parseMembershipsFromSelf', () => {
+    it('maps allGroups entries to slug, display name, and classroom URL', () => {
+        const memberships = parseMembershipsFromSelf({
+            allGroups: [
+                { id: 'g1', name: 'chase-ai', metadata: { displayName: 'Chase AI+' } },
+                { id: 'g2', name: 'no-display-name', metadata: {} }
+            ]
+        });
+
+        expect(memberships).toEqual([
+            { id: 'g1', slug: 'chase-ai', displayName: 'Chase AI+', classroomUrl: 'https://www.skool.com/chase-ai/classroom' },
+            { id: 'g2', slug: 'no-display-name', displayName: 'no-display-name', classroomUrl: 'https://www.skool.com/no-display-name/classroom' }
+        ]);
+    });
+
+    it('skips entries without a slug and tolerates missing allGroups', () => {
+        expect(parseMembershipsFromSelf({ allGroups: [{ metadata: { displayName: 'Nameless' } }] })).toEqual([]);
+        expect(parseMembershipsFromSelf({})).toEqual([]);
+        expect(parseMembershipsFromSelf(null)).toEqual([]);
     });
 });

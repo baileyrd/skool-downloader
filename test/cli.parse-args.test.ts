@@ -48,6 +48,10 @@ describe('parseArgs', () => {
         expect(parseArgs(['login']).command).toBe('login');
     });
 
+    it('parses list command', () => {
+        expect(parseArgs(['list']).command).toBe('list');
+    });
+
     it('parses regenerate-index without a directory', () => {
         const parsed = parseArgs(['regenerate-index']);
         expect(parsed.command).toBe('regenerate-index');

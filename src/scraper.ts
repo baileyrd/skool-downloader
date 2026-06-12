@@ -68,6 +68,36 @@ export interface CourseLibraryResult {
     courses: CourseListItem[];
 }
 
+export interface GroupMembership {
+    id?: string;
+    /** Immutable URL segment, e.g. `chase-ai`. */
+    slug: string;
+    /** Current display name, e.g. `Chase AI+`. */
+    displayName: string;
+    classroomUrl: string;
+}
+
+/**
+ * Extracts the account's group memberships from the home page's
+ * `pageProps.self` object (`allGroups`). Exported for unit testing.
+ */
+export function parseMembershipsFromSelf(self: any): GroupMembership[] {
+    const allGroups = Array.isArray(self?.allGroups) ? self.allGroups : [];
+    return allGroups
+        .map((group: any) => {
+            const slug = group?.name ?? group?.group?.name;
+            if (!slug) return null;
+            const metadata = group?.metadata ?? group?.group?.metadata ?? {};
+            return {
+                id: group?.id ?? group?.group?.id,
+                slug,
+                displayName: metadata.displayName || slug,
+                classroomUrl: `https://www.skool.com/${slug}/classroom`
+            };
+        })
+        .filter((m: GroupMembership | null): m is GroupMembership => m !== null);
+}
+
 /**
  * Normalizes any classroom-related URL to the classroom root: strips query
  * and hash, and drops path segments after `/classroom` (e.g. a course slug).
@@ -262,6 +292,33 @@ export class Scraper {
             courseImageUrl,
             modules: modules.filter(m => m.lessons.length > 0)
         };
+    }
+
+    /**
+     * Lists every community the logged-in account is a member of, from the
+     * home page's `self.allGroups`.
+     */
+    async listMemberships(): Promise<GroupMembership[]> {
+        if (!this.context) await this.init();
+        const page = await this.context!.newPage();
+
+        try {
+            await page.goto('https://www.skool.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+            await page.waitForSelector('#__NEXT_DATA__', { state: 'attached', timeout: 15000 });
+
+            const nextData = await page.evaluate(() => {
+                const script = document.getElementById('__NEXT_DATA__');
+                return script ? JSON.parse(script.innerText) : null;
+            });
+
+            const self = nextData?.props?.pageProps?.self;
+            if (!self) {
+                throw new Error('No account data on skool.com — is the saved login still valid?');
+            }
+            return parseMembershipsFromSelf(self);
+        } finally {
+            await page.close();
+        }
     }
 
     async parseCourseLibrary(url: string): Promise<CourseLibraryResult> {
