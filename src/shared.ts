@@ -6,8 +6,18 @@
 
 import fs from 'fs-extra';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 export { escapeHtml } from './html-escape.js';
+
+/**
+ * Absolute path of the package checkout (the directory containing
+ * package.json). Tool-owned state (.auth/ session, bin/yt-dlp) anchors here
+ * rather than process.cwd(), so the CLI works when invoked from any
+ * directory — e.g. by a scheduler whose working directory is system32.
+ * (The default downloads/ output stays cwd-relative by design.)
+ */
+export const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
  * Windows reserved device names that cannot be used as file or directory

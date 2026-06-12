@@ -638,6 +638,9 @@ async function runWithArgs(args: CliArgs) {
         const loggedIn = await ensureLogin();
         if (!loggedIn) {
             console.log('Login required. Exiting.');
+            // Non-zero so schedulers see "nothing was archived" as a failure
+            // instead of a silent success.
+            process.exitCode = 1;
             return;
         }
         if (isClassroomRootUrl(args.url)) {
@@ -701,6 +704,9 @@ async function runWithArgs(args: CliArgs) {
                 }
 
                 printRunSummary(summaries, failedCourses, locked.length);
+                if (failedCourses > 0) {
+                    process.exitCode = 1;
+                }
             } finally {
                 await sharedScraper.close();
             }

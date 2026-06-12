@@ -9,6 +9,7 @@ import { Readable } from 'stream';
 import { pipeline } from 'node:stream/promises';
 import { createConsoleLogger, type Logger } from './logger.js';
 import { COOKIES_TXT_PATH } from './auth.js';
+import { PACKAGE_ROOT } from './shared.js';
 
 const YTDlpWrap = (YTDlpWrapPkg as any).default || YTDlpWrapPkg;
 
@@ -16,7 +17,10 @@ const YTDlpWrap = (YTDlpWrapPkg as any).default || YTDlpWrapPkg;
 // default import is the binary path string, or null on unsupported platforms.
 const ffmpegPath = ((ffmpegStaticPkg as any).default ?? ffmpegStaticPkg) as string | null;
 
-const BIN_DIR = path.join(process.cwd(), 'bin');
+// Anchored to the checkout (see PACKAGE_ROOT): a scheduler invoking the CLI
+// from another working directory must reuse the managed yt-dlp binary, not
+// try to download a fresh one into its own cwd.
+const BIN_DIR = path.join(PACKAGE_ROOT, 'bin');
 const YTDLP_PATH = path.join(BIN_DIR, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
 
 const IMG_SRC_REGEX = /(<img[^>]+src=")([^">]+)(")/g;

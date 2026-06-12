@@ -2,8 +2,12 @@ import { chromium, type BrowserContext } from 'playwright';
 import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { PACKAGE_ROOT } from './shared.js';
 
-export const AUTH_DIR = path.join(process.cwd(), '.auth');
+// Anchored to the checkout, not process.cwd(): the saved session must be
+// found no matter which directory the CLI is invoked from (schedulers
+// typically start in system32 or the user profile).
+export const AUTH_DIR = path.join(PACKAGE_ROOT, '.auth');
 export const STORAGE_STATE_PATH = path.join(AUTH_DIR, 'storage_state.json');
 export const COOKIES_TXT_PATH = path.join(AUTH_DIR, 'cookies.txt');
 

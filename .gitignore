@@ -16,3 +16,7 @@ bin/ffprobe*
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+# Nightly archive runner: the community list is personal, logs are noise.
+scripts/communities.txt
+scripts/logs/
