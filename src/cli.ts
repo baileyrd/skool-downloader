@@ -16,7 +16,7 @@ import { createConsoleLogger, type Logger } from './logger.js';
 import { extractGroupSlug, reconcileGroupDir } from './reconcile-group.js';
 
 export type CliArgs = {
-    command?: 'login' | 'download' | 'regenerate-index' | 'migrate-video-names' | 'list' | 'help';
+    command?: 'login' | 'download' | 'regenerate-index' | 'migrate-video-names' | 'list' | 'all' | 'help';
     migrateDir?: string;
     url?: string;
     outputDir?: string;
@@ -29,7 +29,7 @@ export type CliArgs = {
 };
 
 function showHelp() {
-    console.log(`\nSkool Downloader\n\nUsage:\n  skool                          Interactive mode\n  skool login                    Log in to Skool\n  skool list                     List the communities your account belongs to\n  skool <classroom-url>          Download a course\n  skool <group-classroom-url>    Download all courses in a community\n  skool <lesson-url>             Download a single lesson (URL with ?md=)\n  skool regenerate-index         Regenerate all course indexes\n  skool migrate-video-names <dir>  Rename legacy video.mp4 files to lesson-title names\n\nOptions:\n  -o, --output <dir>             Output directory (course root)\n  -c, --concurrency <number>     Lesson concurrency (default: 8)\n  -q, --quality <height|best>    Max video height, e.g. 1080 (default) or 'best'\n  --force                        Re-scrape lessons even if already complete on disk\n  --course                       Force course mode (ignore ?md=)\n  --lesson                       Force lesson mode\n  --lesson-id <id>               Explicit lesson id\n  -h, --help                     Show help\n`);
+    console.log(`\nSkool Downloader\n\nUsage:\n  skool                          Interactive mode\n  skool login                    Log in to Skool\n  skool list                     List the communities your account belongs to\n  skool all                      Archive every community your account belongs to\n  skool <classroom-url>          Download a course\n  skool <group-classroom-url>    Download all courses in a community\n  skool <lesson-url>             Download a single lesson (URL with ?md=)\n  skool regenerate-index         Regenerate all course indexes\n  skool migrate-video-names <dir>  Rename legacy video.mp4 files to lesson-title names\n\nOptions:\n  -o, --output <dir>             Output directory (course root)\n  -c, --concurrency <number>     Lesson concurrency (default: 8)\n  -q, --quality <height|best>    Max video height, e.g. 1080 (default) or 'best'\n  --force                        Re-scrape lessons even if already complete on disk\n  --course                       Force course mode (ignore ?md=)\n  --lesson                       Force lesson mode\n  --lesson-id <id>               Explicit lesson id\n  -h, --help                     Show help\n`);
 }
 
 /**
@@ -50,6 +50,10 @@ export function parseArgs(args: string[]): CliArgs {
         }
         if (arg === 'list') {
             parsed.command = 'list';
+            continue;
+        }
+        if (arg === 'all') {
+            parsed.command = 'all';
             continue;
         }
         if (arg === 'regenerate-index') {
@@ -637,7 +641,7 @@ async function runWithArgs(args: CliArgs) {
                 console.log(`  ${membership.displayName.padEnd(nameWidth)}  ${membership.classroomUrl}`);
             }
             console.log('\nPass any classroom URL to `skool <url>` to archive that community,');
-            console.log('or add it to scripts\\communities.txt for the nightly run.');
+            console.log('or run `skool all` to archive every one of them.');
         } finally {
             await scraper.close();
         }
@@ -661,6 +665,44 @@ async function runWithArgs(args: CliArgs) {
         return;
     }
 
+    if (args.command === 'all') {
+        const loggedIn = await ensureLogin();
+        if (!loggedIn) {
+            console.log('Login required. Exiting.');
+            process.exitCode = 1;
+            return;
+        }
+        const sharedScraper = new Scraper(createConsoleLogger());
+        try {
+            const memberships = await sharedScraper.listMemberships();
+            console.log(`Archiving ${memberships.length} communities from your account...`);
+
+            const summaries: DownloadSummary[] = [];
+            let failedCourses = 0;
+            let lockedCourses = 0;
+            for (const membership of memberships) {
+                console.log(pc.bold(`\n════ ${membership.displayName} ════`));
+                try {
+                    const result = await downloadCommunityCourses(membership.classroomUrl, args, sharedScraper);
+                    summaries.push(...result.summaries);
+                    failedCourses += result.failedCourses;
+                    lockedCourses += result.lockedCourses;
+                } catch (err) {
+                    failedCourses += 1;
+                    console.error(`Failed to archive community ${membership.displayName}: ${String(err)}`);
+                }
+            }
+
+            printRunSummary(summaries, failedCourses, lockedCourses);
+            if (failedCourses > 0) {
+                process.exitCode = 1;
+            }
+        } finally {
+            await sharedScraper.close();
+        }
+        return;
+    }
+
     if (args.command === 'download' && args.url) {
         const loggedIn = await ensureLogin();
         if (!loggedIn) {
@@ -671,7 +713,6 @@ async function runWithArgs(args: CliArgs) {
             return;
         }
         if (isClassroomRootUrl(args.url)) {
-            const logger = buildInteractiveLogger();
             // One browser for the whole run: the library fetch and every
             // course download share it instead of relaunching Chromium per
             // course. A console logger (not the quiet clack one) keeps the
@@ -679,59 +720,9 @@ async function runWithArgs(args: CliArgs) {
             // detected: ...") in this flow's plain-console output.
             const sharedScraper = new Scraper(createConsoleLogger());
             try {
-                const library = await fetchCourseLibrary(args.url, logger, sharedScraper);
-                const outputRoot = args.outputDir && args.outputDir !== 'undefined' ? args.outputDir : undefined;
-                let failedCourses = 0;
-                const summaries: DownloadSummary[] = [];
-                const { accessible, locked } = filterAccessibleCourses(library.courses);
-
-                if (locked.length > 0) {
-                    console.warn(`Skipping ${locked.length} locked course${locked.length === 1 ? '' : 's'} (no access):`);
-                    for (const course of locked) {
-                        console.warn(`  🔒 ${course.title}`);
-                    }
-                }
-
-                if (accessible.length === 0) {
-                    console.warn('No accessible courses found to download.');
-                    return;
-                }
-
-                // A group renamed on Skool (or archived under its URL slug
-                // by an older version) gets its existing folder renamed here
-                // instead of the whole community re-downloading into a new one.
-                if (outputRoot) {
-                    await reconcileGroupDir(outputRoot, library.groupName, extractGroupSlug(args.url), createConsoleLogger());
-                }
-
-                for (const course of accessible) {
-                    console.log(pc.bold(`\n📘 ${course.title}`));
-                    try {
-                        const summary = await downloadCourse({
-                            url: course.url,
-                            outputDir: outputRoot ? resolveCourseOutputDir(outputRoot, library.groupName, course.title) : undefined,
-                            concurrency: args.concurrency,
-                            mode: 'course',
-                            force: args.force,
-                            quality: args.quality,
-                            scraper: sharedScraper,
-                            // Regenerated once after the loop instead of
-                            // rescanning every course directory per course.
-                            skipGroupIndex: true
-                        });
-                        summaries.push(summary);
-                    } catch (err) {
-                        failedCourses += 1;
-                        console.error(`Failed to download course ${course.title}: ${String(err)}`);
-                    }
-                }
-
-                if (summaries.length > 0) {
-                    await regenerateGroupIndex(path.dirname(summaries[0].outputDir));
-                }
-
-                printRunSummary(summaries, failedCourses, locked.length);
-                if (failedCourses > 0) {
+                const result = await downloadCommunityCourses(args.url, args, sharedScraper);
+                printRunSummary(result.summaries, result.failedCourses, result.lockedCourses);
+                if (result.failedCourses > 0) {
                     process.exitCode = 1;
                 }
             } finally {
@@ -753,6 +744,69 @@ async function runWithArgs(args: CliArgs) {
     }
 
     await runInteractive();
+}
+
+/**
+ * Downloads every accessible course of one community, sharing `scraper`'s
+ * browser. Used by the classroom-root URL flow and by `skool all`.
+ */
+async function downloadCommunityCourses(
+    classroomUrl: string,
+    args: CliArgs,
+    scraper: Scraper
+): Promise<{ summaries: DownloadSummary[]; failedCourses: number; lockedCourses: number }> {
+    const library = await fetchCourseLibrary(classroomUrl, buildInteractiveLogger(), scraper);
+    const outputRoot = args.outputDir && args.outputDir !== 'undefined' ? args.outputDir : undefined;
+    let failedCourses = 0;
+    const summaries: DownloadSummary[] = [];
+    const { accessible, locked } = filterAccessibleCourses(library.courses);
+
+    if (locked.length > 0) {
+        console.warn(`Skipping ${locked.length} locked course${locked.length === 1 ? '' : 's'} (no access):`);
+        for (const course of locked) {
+            console.warn(`  🔒 ${course.title}`);
+        }
+    }
+
+    if (accessible.length === 0) {
+        console.warn('No accessible courses found to download.');
+        return { summaries, failedCourses, lockedCourses: locked.length };
+    }
+
+    // A group renamed on Skool (or archived under its URL slug by an older
+    // version) gets its existing folder renamed here instead of the whole
+    // community re-downloading into a new one.
+    if (outputRoot) {
+        await reconcileGroupDir(outputRoot, library.groupName, extractGroupSlug(classroomUrl), createConsoleLogger());
+    }
+
+    for (const course of accessible) {
+        console.log(pc.bold(`\n📘 ${course.title}`));
+        try {
+            const summary = await downloadCourse({
+                url: course.url,
+                outputDir: outputRoot ? resolveCourseOutputDir(outputRoot, library.groupName, course.title) : undefined,
+                concurrency: args.concurrency,
+                mode: 'course',
+                force: args.force,
+                quality: args.quality,
+                scraper,
+                // Regenerated once after the loop instead of rescanning
+                // every course directory per course.
+                skipGroupIndex: true
+            });
+            summaries.push(summary);
+        } catch (err) {
+            failedCourses += 1;
+            console.error(`Failed to download course ${course.title}: ${String(err)}`);
+        }
+    }
+
+    if (summaries.length > 0) {
+        await regenerateGroupIndex(path.dirname(summaries[0].outputDir));
+    }
+
+    return { summaries, failedCourses, lockedCourses: locked.length };
 }
 
 async function main() {

@@ -17,6 +17,5 @@ bin/ffprobe*
 /playwright/.cache/
 /playwright/.auth/
 
-# Nightly archive runner: the community list is personal, logs are noise.
-scripts/communities.txt
+# Nightly archive runner logs.
 scripts/logs/

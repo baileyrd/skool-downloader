@@ -1,5 +1,0 @@
-# Copy to communities.txt and list the communities you want archived
-# nightly by nightly-archive.ps1 — one classroom URL per line.
-# Lines starting with # are ignored.
-https://www.skool.com/your-community/classroom
-https://www.skool.com/another-community-1234/classroom

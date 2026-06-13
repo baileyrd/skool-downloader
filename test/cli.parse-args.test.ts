@@ -52,6 +52,12 @@ describe('parseArgs', () => {
         expect(parseArgs(['list']).command).toBe('list');
     });
 
+    it('parses all command with an output dir', () => {
+        const parsed = parseArgs(['all', '-o', 'Z:\\skool_downloads']);
+        expect(parsed.command).toBe('all');
+        expect(parsed.outputDir).toBe('Z:\\skool_downloads');
+    });
+
     it('parses regenerate-index without a directory', () => {
         const parsed = parseArgs(['regenerate-index']);
         expect(parsed.command).toBe('regenerate-index');

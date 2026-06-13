@@ -1,9 +1,11 @@
 # Nightly Skool archive refresh.
 #
-# Runs the downloader for every community listed in communities.txt (one
-# classroom URL per line, # for comments), appending all output to a dated
-# log under scripts\logs\. Continues past per-community failures and exits
-# non-zero if any community failed, so Task Scheduler records the result.
+# Runs `skool all`, which lists every community the saved login belongs to
+# and archives each one — no static community list to maintain; joining a
+# new community on Skool is enough for it to appear in the next night's
+# archive. Output goes to a dated log under scripts\logs\, and the task
+# records failure when the CLI exits non-zero (login expired, any community
+# or course failed).
 #
 # Registered in Task Scheduler as "SkoolArchiveNightly" (daily 3:00 AM).
 
@@ -26,27 +28,15 @@ if (-not (Test-Path $outputRoot)) {
     exit 1
 }
 
-$communitiesFile = Join-Path $PSScriptRoot 'communities.txt'
-if (-not (Test-Path $communitiesFile)) {
-    Write-Log "ERROR: $communitiesFile not found."
-    exit 1
-}
-$urls = Get-Content $communitiesFile | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }
-
 # The CLI anchors its own state (.auth, bin/yt-dlp) to the checkout, but run
-# from the repo anyway so anything cwd-relative (default downloads/) behaves
-# the same as a manual run.
+# from the repo anyway so anything cwd-relative behaves like a manual run.
 Set-Location $repo
 
-Write-Log "Starting nightly archive: $($urls.Count) communities -> $outputRoot"
-$failed = 0
-foreach ($url in $urls) {
-    Write-Log "=== $url ==="
-    & node (Join-Path $repo 'bin\skool.js') $url -o $outputRoot *>> $log
-    if ($LASTEXITCODE -ne 0) {
-        $failed += 1
-        Write-Log "FAILED (exit $LASTEXITCODE): $url"
-    }
+Write-Log "Starting nightly archive (all account communities) -> $outputRoot"
+& node (Join-Path $repo 'bin\skool.js') all -o $outputRoot *>> $log
+$exitCode = $LASTEXITCODE
+if ($exitCode -ne 0) {
+    Write-Log "FAILED (exit $exitCode) — see log above."
 }
 
 # Keep two weeks of logs.
@@ -54,5 +44,5 @@ Get-ChildItem $logDir -Filter 'nightly-*.log' |
     Where-Object LastWriteTime -lt (Get-Date).AddDays(-14) |
     Remove-Item -Force -Confirm:$false
 
-Write-Log "Done. $failed of $($urls.Count) communities failed."
-exit ($failed -gt 0 ? 1 : 0)
+Write-Log "Done (exit $exitCode)."
+exit $exitCode
