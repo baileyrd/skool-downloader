@@ -1,6 +1,60 @@
 import { describe, expect, it } from 'vitest';
+import { errors as playwrightErrors } from 'playwright';
 
-import { parseMembershipsFromSelf, parseTipTap, resolveClassroomRootUrl } from '../src/scraper.js';
+import { parseMembershipsFromSelf, parseTipTap, resolveClassroomRootUrl, Scraper } from '../src/scraper.js';
+
+const silentLogger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+
+/**
+ * Minimal fake Playwright Page for exercising Scraper.loadNextData's retry
+ * logic without a browser. `failTimes` selector waits throw a TimeoutError
+ * before one succeeds; waitForTimeout is a no-op so backoff doesn't sleep.
+ */
+function makeFakePage(options: { failTimes: number; finalData?: unknown; throwNonTimeout?: boolean }) {
+    let waitCalls = 0;
+    const page = {
+        gotoCalls: 0,
+        async goto() { this.gotoCalls += 1; },
+        async waitForSelector() {
+            waitCalls += 1;
+            if (options.throwNonTimeout) throw new Error('navigation crashed');
+            if (waitCalls <= options.failTimes) throw new playwrightErrors.TimeoutError('timed out');
+        },
+        async evaluate() { return options.finalData ?? { ok: true }; },
+        async waitForTimeout() { /* no-op: don't actually sleep in tests */ }
+    };
+    return page;
+}
+
+describe('Scraper.loadNextData (retry on timeout)', () => {
+    const callLoad = (page: unknown) =>
+        (new Scraper(silentLogger) as any).loadNextData(page, 'https://www.skool.com/x', silentLogger);
+
+    it('returns the data on the first try when the page loads promptly', async () => {
+        const page = makeFakePage({ failTimes: 0, finalData: { props: 1 } });
+        await expect(callLoad(page)).resolves.toEqual({ props: 1 });
+        expect(page.gotoCalls).toBe(1);
+    });
+
+    it('retries past transient timeouts and then succeeds', async () => {
+        const page = makeFakePage({ failTimes: 2, finalData: { props: 2 } });
+        await expect(callLoad(page)).resolves.toEqual({ props: 2 });
+        // 2 timeouts + 1 success = 3 navigation attempts.
+        expect(page.gotoCalls).toBe(3);
+    });
+
+    it('gives up with the timeout error after the attempt cap', async () => {
+        const page = makeFakePage({ failTimes: 99 });
+        await expect(callLoad(page)).rejects.toBeInstanceOf(playwrightErrors.TimeoutError);
+        expect(page.gotoCalls).toBe(3);
+    });
+
+    it('does not retry a non-timeout error', async () => {
+        const page = makeFakePage({ failTimes: 0, throwNonTimeout: true });
+        await expect(callLoad(page)).rejects.toThrow('navigation crashed');
+        expect(page.gotoCalls).toBe(1);
+    });
+});
 
 describe('resolveClassroomRootUrl', () => {
     it('strips a course slug after /classroom', () => {

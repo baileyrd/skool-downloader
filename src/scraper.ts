@@ -1,10 +1,19 @@
-import { chromium, errors as playwrightErrors, type Browser, type BrowserContext } from 'playwright';
+import { chromium, errors as playwrightErrors, type Browser, type BrowserContext, type Page } from 'playwright';
 import fs from 'fs-extra';
 import pLimit from 'p-limit';
 import { createConsoleLogger, type Logger } from './logger.js';
 import { STORAGE_STATE_PATH } from './auth.js';
 import { escapeHtml } from './html-escape.js';
 import { assignResourceFileNames } from './shared.js';
+
+// Page navigation + the wait for the server-rendered __NEXT_DATA__ blob.
+// Under a heavy run (many concurrent lesson pages competing with saturating
+// video downloads) a single attempt at a 15s selector wait times out for a
+// meaningful fraction of lessons — a full backfill saw hundreds fail this
+// way. A longer wait plus a couple of retries with backoff turns those
+// transient timeouts into successes within the same run.
+const NEXT_DATA_TIMEOUT_MS = 30000;
+const NAV_MAX_ATTEMPTS = 3;
 
 // Native Skool (Mux) video extraction clicks play and lets the stream run
 // while polling for the signed manifest URL. Each playing video decodes in
@@ -158,6 +167,40 @@ export class Scraper {
         if (this.browser) await this.browser.close();
     }
 
+    /**
+     * Navigates `page` to `url` and returns the parsed `__NEXT_DATA__` blob,
+     * retrying the whole navigation on a load/selector timeout with linear
+     * backoff. A heavy run pushes individual page loads past the selector
+     * wait; one retry recovers most of those without re-running the lesson.
+     *
+     * Throws after {@link NAV_MAX_ATTEMPTS} failed attempts, or immediately
+     * on a non-timeout error (those won't be fixed by waiting).
+     */
+    private async loadNextData(page: Page, url: string, logger: Logger): Promise<any> {
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= NAV_MAX_ATTEMPTS; attempt++) {
+            try {
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                // __NEXT_DATA__ is part of the server-rendered HTML, so waiting
+                // for the script element is faster and more reliable than a
+                // fixed sleep.
+                await page.waitForSelector('#__NEXT_DATA__', { state: 'attached', timeout: NEXT_DATA_TIMEOUT_MS });
+                return await page.evaluate(() => {
+                    const script = document.getElementById('__NEXT_DATA__');
+                    return script ? JSON.parse(script.innerText) : null;
+                });
+            } catch (err) {
+                lastError = err;
+                const isTimeout = err instanceof playwrightErrors.TimeoutError;
+                if (!isTimeout || attempt === NAV_MAX_ATTEMPTS) break;
+                const backoffMs = attempt * 2000;
+                logger.warn(`    ⏳ Page load timed out (attempt ${attempt}/${NAV_MAX_ATTEMPTS}), retrying in ${backoffMs / 1000}s...`);
+                await page.waitForTimeout(backoffMs);
+            }
+        }
+        throw lastError;
+    }
+
     async parseClassroom(url: string): Promise<ClassroomResult> {
         if (!this.context) await this.init();
         const page = await this.context!.newPage();
@@ -165,17 +208,12 @@ export class Scraper {
         // Ensure we are using a clean classroom URL without query params for structure extraction
         const cleanUrl = url.split('?')[0]!;
         this.logger.info(`Navigating to ${cleanUrl}...`);
-        await page.goto(cleanUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        // __NEXT_DATA__ is part of the server-rendered HTML, so waiting for the
-        // script element is both faster and more reliable than a fixed sleep.
-        await page.waitForSelector('#__NEXT_DATA__', { state: 'attached', timeout: 15000 });
-
-        const nextData = await page.evaluate(() => {
-            const script = document.getElementById('__NEXT_DATA__');
-            return script ? JSON.parse(script.innerText) : null;
-        });
-
-        await page.close();
+        let nextData: any;
+        try {
+            nextData = await this.loadNextData(page, cleanUrl, this.logger);
+        } finally {
+            await page.close();
+        }
 
         if (!nextData) throw new Error('Could not find __NEXT_DATA__ on classroom page');
 
@@ -303,14 +341,7 @@ export class Scraper {
         const page = await this.context!.newPage();
 
         try {
-            await page.goto('https://www.skool.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-            await page.waitForSelector('#__NEXT_DATA__', { state: 'attached', timeout: 15000 });
-
-            const nextData = await page.evaluate(() => {
-                const script = document.getElementById('__NEXT_DATA__');
-                return script ? JSON.parse(script.innerText) : null;
-            });
-
+            const nextData = await this.loadNextData(page, 'https://www.skool.com/', this.logger);
             const self = nextData?.props?.pageProps?.self;
             if (!self) {
                 throw new Error('No account data on skool.com — is the saved login still valid?');
@@ -327,17 +358,12 @@ export class Scraper {
 
         const classroomUrl = resolveClassroomRootUrl(url);
         this.logger.info(`Navigating to ${classroomUrl}...`);
-        await page.goto(classroomUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        // __NEXT_DATA__ is part of the server-rendered HTML, so waiting for the
-        // script element is both faster and more reliable than a fixed sleep.
-        await page.waitForSelector('#__NEXT_DATA__', { state: 'attached', timeout: 15000 });
-
-        const nextData = await page.evaluate(() => {
-            const script = document.getElementById('__NEXT_DATA__');
-            return script ? JSON.parse(script.innerText) : null;
-        });
-
-        await page.close();
+        let nextData: any;
+        try {
+            nextData = await this.loadNextData(page, classroomUrl, this.logger);
+        } finally {
+            await page.close();
+        }
 
         if (!nextData) throw new Error('Could not find __NEXT_DATA__ on classroom page');
 
@@ -411,15 +437,7 @@ export class Scraper {
         // try/finally guarantees the page is closed even when extraction throws;
         // otherwise failed lessons leak pages into the shared browser context.
         try {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-            // __NEXT_DATA__ is part of the server-rendered HTML, so waiting for the
-            // script element is both faster and more reliable than a fixed sleep.
-            await page.waitForSelector('#__NEXT_DATA__', { state: 'attached', timeout: 15000 });
-
-            const nextData = await page.evaluate(() => {
-                const script = document.getElementById('__NEXT_DATA__');
-                return script ? JSON.parse(script.innerText) : null;
-            });
+            const nextData = await this.loadNextData(page, url, logger);
 
             if (!nextData) throw new Error(`Could not find __NEXT_DATA__ for lesson at ${url}`);
 
